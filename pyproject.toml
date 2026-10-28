@@ -1,0 +1,45 @@
+[project]
+name = "fdebench-triage"
+version = "0.3.0"
+description = "Typed asynchronous triage, document extraction and workflow execution API."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "httpx>=0.28,<1",
+    "jsonschema>=4.23,<5",
+    "pillow>=11,<13",
+    "pydantic[email]>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "redis>=5,<8",
+    "uvicorn[standard]>=0.34,<1",
+]
+
+[dependency-groups]
+dev = [
+    "fakeredis[lua]>=2.26,<3",
+    "mypy>=1.15,<2",
+    "pytest>=8.3,<10",
+    "pytest-asyncio>=0.25,<2",
+    "ruff>=0.11,<1",
+    "types-jsonschema>=4.23",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.uv]
+package = false

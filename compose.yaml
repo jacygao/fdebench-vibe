@@ -1,0 +1,24 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    environment:
+      TRIAGE_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always"]
+    volumes:
+      - decisions:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+
+volumes:
+  decisions:
