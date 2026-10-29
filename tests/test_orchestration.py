@@ -893,6 +893,46 @@ async def test_workflow_burst_has_bounded_admission(settings: Settings, redis: R
         assert await redis.dbsize() == 51
 
 
+async def test_late_admitted_workflow_is_rejected_unclaimed_and_retryable(
+    settings: Settings, redis: Redis
+) -> None:
+    observed: list[dict[str, Any]] = []
+    effects: list[str] = []
+
+    def tools(request: httpx.Request) -> httpx.Response:
+        effects.append(str(request.url))
+        return httpx.Response(200, json={"ok": True})
+
+    late = workflow([tool("lookup")], task_id="late-admitted")
+
+    async def slow_body() -> AsyncIterator[bytes]:
+        await asyncio.sleep(0.9)
+        yield json.dumps(late).encode()
+
+    async with client_for(
+        config(settings, orchestrate_timeout_seconds=2.6),
+        redis,
+        [plan([call("lookup")]), plan(status="completed")],
+        tools,
+        observed=observed,
+    ) as c:
+        rejected_response = await c.post(
+            "/orchestrate", content=slow_body(), headers={"content-type": "application/json"}
+        )
+        assert rejected_response.status_code == 504
+        assert rejected_response.json()["error"]["code"] == "WORKFLOW_DEADLINE"
+        assert (observed, effects) == ([], [])
+        assert await Journal.existing(redis, WorkflowRequest.model_validate(late)) is None
+
+        retried = await c.post("/orchestrate", json=late)
+        assert retried.status_code == 200
+        assert retried.json()["status"] == "completed"
+        assert len(retried.json()["steps_executed"]) == 1
+        assert len(effects) == 1
+        assert (await c.post("/orchestrate", json=late)).json() == retried.json()
+        assert len(effects) == 1
+
+
 async def test_parallel_failure_keeps_successful_sibling(settings: Settings, redis: Redis) -> None:
     def tools(request: httpx.Request) -> httpx.Response:
         if "/audit_log?" in str(request.url):

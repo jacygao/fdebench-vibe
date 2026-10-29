@@ -85,6 +85,9 @@ class OrchestrationEngine:
                         "Configure TRIAGE_LLM_API_KEY before starting a workflow.",
                         503,
                     )
+                execution_deadline = deadline - 2
+                if asyncio.get_running_loop().time() >= execution_deadline:
+                    raise TimeoutError
                 journal, claimed = await Journal.claim(
                     self.redis, workflow, model_name=self.settings.orchestrate_model
                 )
@@ -95,7 +98,6 @@ class OrchestrationEngine:
                         True,
                         journal.state.model_name or self.settings.orchestrate_model,
                     )
-                execution_deadline = deadline - 2
                 try:
                     async with asyncio.timeout_at(execution_deadline):
                         await self._run(

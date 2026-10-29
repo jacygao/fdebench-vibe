@@ -267,7 +267,9 @@ calls run concurrently; dependencies require a later observed-result round.
 The body limit is 256 KiB and each tool response is bounded at 256 KiB. Planning
 stops above a 2 MiB journal budget, which a final batch can exceed.
 Excess workflows queue before body buffering within the original total deadline;
-queue expiry returns 504 without claiming or executing the task. Queueing never
+queue expiry, or admission after the execution budget preceding the two-second
+finalization reserve has elapsed, returns 504 without claiming or executing the
+task, so a retry with fresh time can still run it once. Queueing never
 grants permission to replay an existing workflow.
 
 Redis permanently claims each exact task ID **before any tool execution** and
