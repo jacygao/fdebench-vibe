@@ -19,7 +19,7 @@ All requested routes and documentation are implemented. The service is
 
 ## Recorded local evidence
 
-The combined triage/extraction/orchestration suite passed **208 automated tests**
+The combined triage/extraction/orchestration suite passed **209 automated tests**
 on Python 3.12.14. Ruff lint and formatting checks, strict mypy
 over 25 source files and the dependency lockfile check also passed.
 
@@ -45,6 +45,7 @@ shared decisions across application instances; duplicate-work leases; queued
 bursts; queue expiry without provider work or capacity leaks; one-shot decision
 correction, strict persistent-failure rejection and correction deadlines;
 body-receiving deadlines; duplicate waiter expiry without releasing the owner's lease;
+late workflow admission without a permanent claim, followed by a successful same-ID retry;
 storage outages; connection recovery after idle; headers; and log privacy.
 Adversarial tests establish instruction/data separation, not successful semantic
 resistance to injection by a real model.
@@ -122,7 +123,7 @@ models and Redis on 2026-10-29 UTC recorded:
 |---|---|---|
 | `/triage` | 50/50 HTTP 200 | 2.14 seconds |
 | `/extract` | 50/50 HTTP 200 | 1.56 seconds |
-| `/orchestrate` | 50/50 HTTP 200 | 4.56 seconds |
+| `/orchestrate` | 50/50 HTTP 200 | 5.32 seconds |
 
 Each burst started one producer; 49 requests reused cached results or durable
 workflow snapshots. Malformed JSON and empty
@@ -139,7 +140,7 @@ than reuse a shared result:
 |---|---|---|
 | Public `/triage` | 50/50 valid HTTP 200, no cache hits | 6.45 seconds |
 | Public `/extract` | 50/50 valid HTTP 200, no cache hits | 12.83 seconds |
-| Isolated `/orchestrate` with a controlled HTTP tool | 50/50 completed, no cache hits | 21.03 seconds |
+| Isolated `/orchestrate` with a controlled HTTP tool | 50/50 completed, no cache hits | 21.26 seconds |
 
 The self-review also reproduced HTTP 502 `MODEL_ROUTING_CONFLICT` on the
 unchanged public `SIG-2954` request. Schema validation received a correction
@@ -149,6 +150,13 @@ and usage accounting. Persistent failures still return explicit 502s without
 caching or rewriting teams. The formerly failing request returned a valid
 HTTP 200 in 3.51 seconds after the fix. Real-socket regressions reproduced
 ownership and ticket failures before the fix and now pass.
+
+The validation gate found another missed edge case: a delayed request could
+permanently claim a workflow after its execution budget had elapsed, consuming
+the time reserved for finalization. A pre-claim deadline check now rejects that
+unstarted work with 504. The regression verifies no planner/tool work or journal
+claim and a successful same-ID retry. The affected public and controlled-tool
+workflow probes were repeated after applying that guard to the running API.
 
 The public workflow numbers establish the supplied HTTP/response-field contract, not
 successful completion: the isolated read-only synthetic tool request returned
