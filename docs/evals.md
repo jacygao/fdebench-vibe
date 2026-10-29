@@ -19,7 +19,7 @@ All requested routes and documentation are implemented. The service is
 
 ## Recorded local evidence
 
-The combined triage/extraction/orchestration suite passed **183 automated tests**
+The combined triage/extraction/orchestration suite passed **186 automated tests**
 on Python 3.12.14. Ruff lint and formatting checks, strict mypy
 over 25 source files and the dependency lockfile check also passed.
 
