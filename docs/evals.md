@@ -19,14 +19,19 @@ All requested routes and documentation are implemented. The service is
 
 ## Recorded local evidence
 
-The combined triage/extraction/orchestration suite passed **194 automated tests**
+The combined triage/extraction/orchestration suite passed **208 automated tests**
 on Python 3.12.14. Ruff lint and formatting checks, strict mypy
 over 25 source files and the dependency lockfile check also passed.
 
 The suite executes the application with mocked provider HTTP transport and an
-in-process Redis-compatible store supporting Lua scripts. Three smoke tests start
-real local HTTP socket servers. The triage burst test sends eight concurrent
-requests through two model slots, corrects one invalid decision, and checks
+in-process Redis-compatible store supporting Lua scripts. Eight test cases start
+real local HTTP socket servers. A parameterized cold-burst regression sends
+50 simultaneous identical requests to each task endpoint, requires 50 valid
+HTTP 200 responses and checks repeatability and no duplicate provider/tool work.
+Triage descriptions and workflow goals contain zero-width, right-to-left and
+emoji characters. The separate triage burst test sends eight concurrent
+requests through two model slots, corrects schema, ownership or ticket-correlation
+failures within one shared correction budget, and checks
 stable caching and aggregate usage without overload rejection.
 The orchestration socket test makes actual HTTP
 tool POSTs through production DNS-pinned dispatch, not a mocked tool transport;
@@ -39,6 +44,7 @@ retry timing; total deadlines; ticket correlation; P1 escalation; ownership;
 shared decisions across application instances; duplicate-work leases; queued
 bursts; queue expiry without provider work or capacity leaks; one-shot decision
 correction, strict persistent-failure rejection and correction deadlines;
+body-receiving deadlines; duplicate waiter expiry without releasing the owner's lease;
 storage outages; connection recovery after idle; headers; and log privacy.
 Adversarial tests establish instruction/data separation, not successful semantic
 resistance to injection by a real model.
@@ -49,7 +55,9 @@ local references, nested tables and per-field failures, typed normalization,
 all-null blank-page responses, supported formats, angled raster documents,
 transparency, EXIF orientation, pixel/byte limits, multi-page rejection, provider
 throttles and hard timeouts, shared duplicate leases/cache reuse, and a 50-request
-burst with controlled 503 overflow. The socket test exercises both task endpoints
+burst with bounded queued success. An admission regression verifies that queue
+waiting consumes the original extraction deadline and releases capacity on expiry.
+The socket tests exercise both task endpoints
 and malformed-schema rejection. Log checks verify document/model/latency/usage/
 null-path metadata without image payloads or credentials.
 
@@ -63,7 +71,7 @@ fallback when no calendar slots exist, 429 cooldowns, conservative 500/timeout
 retries, redirects, malformed/oversized responses, partial sibling failures,
 deadline snapshots, task conflicts, worker-crash claims, duplicate retrieval
 after model/origin configuration changes,
-storage failure before a side effect and a 50-request burst with bounded overflow.
+storage failure before a side effect and queued workflows with bounded admission.
 Log checks inspect actual formatted output without parameter/result values.
 These are synthetic variations, not a score on the public replay dataset.
 
@@ -100,6 +108,62 @@ queueing and adding one strict validation-correction attempt, a public burst of
 All 50 repeats returned identical cached decisions with zero new model tokens.
 No invalid decisions occurred during that burst; correction behavior is covered
 by the provider-mocked regressions above.
+
+The subsequently supplied resilience contract requires at least 48 valid
+responses to a 50-request burst. A cold burst of 50 **identical** triage requests
+reproduced a different failure: one HTTP 200 and 49 in-progress-lease HTTP 503s.
+Real-socket regressions reproduced rejection on all three endpoints before the
+shared-result waiting and deadline-bounded admission fixes.
+
+After those fixes and a follow-up self-review, public HTTPS checks using live
+models and Redis on 2026-10-29 UTC recorded:
+
+| Endpoint | Cold identical burst with all response fields | Slowest response |
+|---|---|---|
+| `/triage` | 50/50 HTTP 200 | 2.14 seconds |
+| `/extract` | 50/50 HTTP 200 | 1.56 seconds |
+| `/orchestrate` | 50/50 HTTP 200 | 4.56 seconds |
+
+Each burst started one producer; 49 requests reused cached results or durable
+workflow snapshots. Malformed JSON and empty
+objects returned 422, wrong content types returned 415, and a 1 MiB unknown field
+returned 413 for triage/orchestration and a valid cached 200 for extraction.
+Unicode triage descriptions and workflow goals were accepted. Three repetitions
+were identical, and all task endpoints returned valid 200 responses after five
+seconds idle.
+
+Additional cold bursts changed every request ID to require distinct work rather
+than reuse a shared result:
+
+| Endpoint and setting | Cold unique burst | Slowest response |
+|---|---|---|
+| Public `/triage` | 50/50 valid HTTP 200, no cache hits | 6.45 seconds |
+| Public `/extract` | 50/50 valid HTTP 200, no cache hits | 12.83 seconds |
+| Isolated `/orchestrate` with a controlled HTTP tool | 50/50 completed, no cache hits | 21.03 seconds |
+
+The self-review also reproduced HTTP 502 `MODEL_ROUTING_CONFLICT` on the
+unchanged public `SIG-2954` request. Schema validation received a correction
+attempt, but engine ownership/ticket checks ran afterward and bypassed it.
+Both checks now participate in the same one-shot correction, original deadline
+and usage accounting. Persistent failures still return explicit 502s without
+caching or rewriting teams. The formerly failing request returned a valid
+HTTP 200 in 3.51 seconds after the fix. Real-socket regressions reproduced
+ownership and ticket failures before the fix and now pass.
+
+The public workflow numbers establish the supplied HTTP/response-field contract, not
+successful completion: the isolated read-only synthetic tool request returned
+404 because the evaluator service uses opaque registered scenario IDs. Its
+failure remained explicit in the final trace, with one attempted tool call and
+no replay. A prior synthetic plan was also rejected by the existing guards.
+To verify completion separately, an isolated instance used the real model and
+Redis with one exactly authorized, controlled local HTTP tool; production
+destination authorization was unchanged. Its cold identical burst produced
+50 valid answers and one completed workflow with exactly one actual tool call.
+Its cold unique burst completed all 50 workflows with exactly 50 additional
+tool calls. Successful completion against the deployed evaluator service
+remains unverified without its valid tool definitions.
+These checks do not establish that ngrok exhausted a quota
+or that the original hosted scoring failure has been resolved.
 
 No successful public/hidden benchmark score or labelled live-model evaluation
 is claimed. Neither synthetic checks nor mocked contract tests establish

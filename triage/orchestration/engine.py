@@ -48,20 +48,15 @@ class OrchestrationEngine:
         self.settings = settings
         self.capacity = asyncio.Semaphore(settings.max_concurrent_workflows)
 
-    async def orchestrate(self, workflow: WorkflowRequest) -> OrchestrationResult:
+    async def orchestrate(
+        self, workflow: WorkflowRequest, *, deadline: float | None = None
+    ) -> OrchestrationResult:
         """Run once per opaque task ID; return the persisted snapshot on duplicates."""
         usage = Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
-        started = asyncio.get_running_loop().time()
-        # Refuse capacity before claiming a task that has not begun.
+        if deadline is None:
+            deadline = asyncio.get_running_loop().time() + self.settings.orchestrate_timeout_seconds
         try:
-            async with asyncio.timeout(0.01):
-                await self.capacity.acquire()
-        except TimeoutError as exc:
-            raise TriageError(
-                "WORKFLOW_CAPACITY_EXCEEDED", "All workflow execution slots are busy.", 503
-            ) from exc
-        try:
-            async with asyncio.timeout(self.settings.orchestrate_timeout_seconds):
+            async with asyncio.timeout_at(deadline), self.capacity:
                 existing = await Journal.existing(self.redis, workflow)
                 if existing is not None:
                     return OrchestrationResult(
@@ -100,10 +95,12 @@ class OrchestrationEngine:
                         True,
                         journal.state.model_name or self.settings.orchestrate_model,
                     )
-                deadline = started + self.settings.orchestrate_timeout_seconds - 2
+                execution_deadline = deadline - 2
                 try:
-                    async with asyncio.timeout_at(deadline):
-                        await self._run(workflow, journal, destinations, usage, deadline=deadline)
+                    async with asyncio.timeout_at(execution_deadline):
+                        await self._run(
+                            workflow, journal, destinations, usage, deadline=execution_deadline
+                        )
                 except (TriageError, TimeoutError) as exc:
                     journal.state.result.reason = (
                         exc.code if isinstance(exc, TriageError) else "WORKFLOW_DEADLINE"
@@ -133,8 +130,6 @@ class OrchestrationEngine:
                 "Workflow deadline exceeded; do not replay under a different task ID.",
                 504,
             ) from exc
-        finally:
-            self.capacity.release()
 
     async def _run(
         self,

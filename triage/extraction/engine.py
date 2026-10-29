@@ -36,25 +36,15 @@ class ExtractionEngine:
         self.settings = settings
         self.capacity = asyncio.Semaphore(settings.max_concurrent_extractions)
 
-    async def extract(self, document: ExtractionRequest) -> ExtractionResult:
+    async def extract(
+        self, document: ExtractionRequest, *, deadline: float | None = None
+    ) -> ExtractionResult:
         """Validate before inference and keep total processing below the caller's minute."""
         try:
-            async with asyncio.timeout(self.settings.extract_timeout_seconds):
+            if deadline is None:
                 deadline = asyncio.get_running_loop().time() + self.settings.extract_timeout_seconds
-                try:
-                    async with asyncio.timeout(0.01):
-                        await self.capacity.acquire()
-                except TimeoutError as exc:
-                    raise TriageError(
-                        "EXTRACTION_CAPACITY_EXCEEDED",
-                        "All extraction slots are busy; retry later.",
-                        503,
-                        retry_after=1,
-                    ) from exc
-                try:
-                    return await self._extract(document, deadline=deadline)
-                finally:
-                    self.capacity.release()
+            async with asyncio.timeout_at(deadline):
+                return await self._extract(document, deadline=deadline)
         except TimeoutError as exc:
             raise TriageError(
                 "EXTRACTION_DEADLINE_EXCEEDED",
@@ -69,37 +59,33 @@ class ExtractionEngine:
                 "MODEL_NOT_CONFIGURED", "Configure TRIAGE_LLM_API_KEY before extraction.", 503
             )
         key = self.store.key(document.model_copy(update={"json_schema": plan.schema}))
-        saved = await self.store.get(key)
-        if saved is not None:
-            return self._cached(saved, plan, document.document_id)
-        image = await asyncio.to_thread(prepare_image, document.content)
-        token = await self.store.acquire(key)
-        try:
-            saved = await self.store.get(key)
+        async with self.store.reserve(key, deadline=deadline) as saved:
             if saved is not None:
                 return self._cached(saved, plan, document.document_id)
-            started = perf_counter()
-            result = await extract_document(self.llm, image, plan, self.settings, deadline=deadline)
-            logger.info(
-                "extraction_model_completed",
-                extra={
-                    "document_id": document.document_id,
-                    "model": self.settings.extract_model,
-                    "duration_ms": round((perf_counter() - started) * 1000, 2),
-                    "input_tokens": result.usage.prompt_tokens,
-                    "output_tokens": result.usage.completion_tokens,
-                    "total_tokens": result.usage.total_tokens,
-                },
-            )
-            fields = await asyncio.to_thread(
-                normalize_record, result.content, plan, document.document_id
-            )
-            record = ExtractionRecord(fields)
-            saved = await self.store.save(key, record)
-            validated = self._cached(saved, plan, document.document_id)
-            return ExtractionResult(validated.record, result.usage, result.estimated_cost)
-        finally:
-            await self.store.release(key, token)
+            async with self.capacity:
+                image = await asyncio.to_thread(prepare_image, document.content)
+                started = perf_counter()
+                result = await extract_document(
+                    self.llm, image, plan, self.settings, deadline=deadline
+                )
+                logger.info(
+                    "extraction_model_completed",
+                    extra={
+                        "document_id": document.document_id,
+                        "model": self.settings.extract_model,
+                        "duration_ms": round((perf_counter() - started) * 1000, 2),
+                        "input_tokens": result.usage.prompt_tokens,
+                        "output_tokens": result.usage.completion_tokens,
+                        "total_tokens": result.usage.total_tokens,
+                    },
+                )
+                fields = await asyncio.to_thread(
+                    normalize_record, result.content, plan, document.document_id
+                )
+                record = ExtractionRecord(fields)
+                saved = await self.store.save(key, record)
+                validated = self._cached(saved, plan, document.document_id)
+                return ExtractionResult(validated.record, result.usage, result.estimated_cost)
 
     def _cached(
         self, saved: ExtractionRecord, plan: SchemaPlan, document_id: str

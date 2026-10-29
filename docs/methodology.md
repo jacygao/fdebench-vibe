@@ -32,7 +32,8 @@ reports; decision text can still contain sensitive information.
 The engine checks ticket correlation and ownership coherence and enforces P1
 escalation. Invalid decisions receive one model-led correction using validation
 feedback and the unchanged original policy and signal. The correction must pass
-the same validation; persistent invalid labels, contradictory decisions and
+the same validation. Schema, ticket-correlation and ownership failures share
+one correction budget, not separate retries. Persistent invalid labels, contradictory decisions and
 malformed provider output remain explicit errors. Logs record recognized
 validation field names and error types without candidate values. The engine
 does not silently rewrite category/team disagreements,
@@ -40,7 +41,9 @@ because an action plan for the original team could become unsafe.
 
 Redis leases coordinate duplicate work across instances. Per-process model
 capacity is bounded; triage bursts wait for a model slot instead of failing
-immediately. Queueing, transient retries and validation correction share a
+immediately. Identical inputs wait for the lease owner's committed decision
+without holding active model slots or starting another inference.
+Queueing, body receiving, transient retries and validation correction share a
 20-second default total budget; provider `Retry-After` wins over local backoff.
 Expired queued requests do not start provider work or retain a model slot.
 Long retry delays are returned as 503 instead of sleeping beyond the deadline.
@@ -91,7 +94,9 @@ not claims of supporting every JSON Schema construct.
 
 Extraction reuses Redis first-commit semantics with a separate task/policy
 namespace. A changed schema cannot reuse a stale record. Capacity admission occurs
-before buffering large requests; overflow gets 503 with a retry delay. Default
+before buffering large requests; excess requests wait within the original
+deadline without buffering, and expiry returns 504. Cold duplicates share the
+committed record rather than causing another vision call. Default
 capacity is a safety bound, not a claim that one instance can complete 50 simultaneous
 vision calls. Real replicas, provider quotas and memory must be sized from measurements.
 

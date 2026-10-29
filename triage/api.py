@@ -104,6 +104,9 @@ def create_app(
         RequestSizeLimit,
         extract_concurrency=config.max_concurrent_extractions,
         workflow_concurrency=config.max_concurrent_workflows,
+        triage_timeout=config.request_timeout_seconds,
+        extract_timeout=config.extract_timeout_seconds,
+        workflow_timeout=config.orchestrate_timeout_seconds,
     )
 
     @app.middleware("http")
@@ -235,7 +238,7 @@ def create_app(
         engine: TriageEngine = request.app.state.engine
         request.state.ticket_id = signal.ticket_id
         start = perf_counter()
-        result = await engine.triage(signal)
+        result = await engine.triage(signal, deadline=request.state.deadline)
         request.state.total_tokens = result.usage.total_tokens
         _result_headers(response, result)
         logger.info(
@@ -256,7 +259,7 @@ def create_app(
         """Extract schema-defined fields and echo the exact caller document ID."""
         engine: ExtractionEngine = request.app.state.extraction
         request.state.document_id = document.document_id
-        result = await engine.extract(document)
+        result = await engine.extract(document, deadline=request.state.deadline)
         request.state.total_tokens = result.usage.total_tokens
         request.state.null_fields = null_fields(result.record.root)
         _result_headers(response, result)
@@ -281,7 +284,7 @@ def create_app(
         """Execute authorized tools and return the persisted, non-replayable HTTP trace."""
         engine: OrchestrationEngine = request.app.state.orchestration
         request.state.task_id = workflow.task_id
-        result = await engine.orchestrate(workflow)
+        result = await engine.orchestrate(workflow, deadline=request.state.deadline)
         response.headers["X-Model-Name"] = result.model_name
         request.state.total_tokens = result.usage.total_tokens
         response.headers["X-LLM-Input-Tokens"] = str(result.usage.prompt_tokens)

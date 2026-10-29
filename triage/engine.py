@@ -28,15 +28,16 @@ class TriageEngine:
         self.settings = settings
         self.capacity = asyncio.Semaphore(settings.max_concurrent_models)
 
-    async def triage(self, signal: Signal) -> ModelResult:
+    async def triage(self, signal: Signal, *, deadline: float | None = None) -> ModelResult:
         """Return a stable shared decision under bounded latency and concurrency."""
         if not self.settings.configured:
             raise TriageError(
                 "MODEL_NOT_CONFIGURED", "Configure TRIAGE_LLM_API_KEY before triaging signals.", 503
             )
         try:
-            deadline = asyncio.get_running_loop().time() + self.settings.request_timeout_seconds
-            async with asyncio.timeout(self.settings.request_timeout_seconds):
+            if deadline is None:
+                deadline = asyncio.get_running_loop().time() + self.settings.request_timeout_seconds
+            async with asyncio.timeout_at(deadline):
                 return await self._triage(signal, deadline=deadline)
         except TimeoutError as exc:
             raise TriageError(
@@ -45,22 +46,17 @@ class TriageEngine:
 
     async def _triage(self, signal: Signal, *, deadline: float) -> ModelResult:
         key = self.store.key(signal)
-        saved = await self.store.get(key)
-        if saved is not None:
-            return self._cached(signal, saved)
-        async with self.capacity:
-            token = await self.store.acquire(key)
-            try:
-                # Another worker may have committed between our read and lease acquisition.
-                saved = await self.store.get(key)
-                if saved is not None:
-                    return self._cached(signal, saved)
-                result = await self.llm.classify(signal, deadline=deadline)
-                result = self._validate(signal, result)
+        async with self.store.reserve(key, deadline=deadline) as saved:
+            if saved is not None:
+                return self._cached(signal, saved)
+            async with self.capacity:
+                result = await self.llm.classify(
+                    signal,
+                    deadline=deadline,
+                    validate=lambda candidate: self._validate(signal, candidate),
+                )
                 saved = await self.store.save(key, result.decision)
                 return replace(result, decision=saved)
-            finally:
-                await self.store.release(key, token)
 
     def _cached(self, signal: Signal, decision: TriageDecision) -> ModelResult:
         return self._validate(

@@ -865,21 +865,32 @@ async def test_workflow_burst_has_bounded_admission(settings: Settings, redis: R
     async with client_for(
         config(settings, max_concurrent_workflows=1),
         redis,
-        [plan([call("lookup")]), plan(status="completed")],
+        [item for _ in range(51) for item in (plan([call("lookup")]), plan(status="completed"))],
         tools,
     ) as c:
         active = asyncio.create_task(c.post("/orchestrate", json=workflow([tool("lookup")])))
-        await asyncio.wait_for(entered.wait(), 2)
-        responses = await asyncio.gather(
-            *[
-                c.post("/orchestrate", json=workflow([tool("lookup")], task_id=f"overflow-{index}"))
+        pending = [active]
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            pending.extend(
+                asyncio.create_task(
+                    c.post(
+                        "/orchestrate",
+                        json=workflow([tool("lookup")], task_id=f"queued-{index}"),
+                    )
+                )
                 for index in range(50)
-            ]
-        )
-        assert all(response.status_code == 503 for response in responses)
-        assert await redis.dbsize() == 1
-        finish.set()
-        assert (await active).json()["status"] == "completed"
+            )
+            await asyncio.sleep(0.03)
+            assert not any(task.done() for task in pending)
+            assert await redis.dbsize() == 1
+        finally:
+            finish.set()
+            responses = await asyncio.gather(*pending)
+        assert all(response.status_code == 200 for response in responses)
+        assert all(response.json()["status"] == "completed" for response in responses)
+        assert all(len(response.json()["steps_executed"]) == 1 for response in responses)
+        assert await redis.dbsize() == 51
 
 
 async def test_parallel_failure_keeps_successful_sibling(settings: Settings, redis: Redis) -> None:

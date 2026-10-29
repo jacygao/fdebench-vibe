@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock
@@ -17,6 +18,45 @@ from triage.api import create_app
 from triage.models import Signal
 from triage.settings import Settings
 from triage.store import DecisionStore
+
+
+@pytest.mark.parametrize(
+    ("path", "code"),
+    [
+        ("/triage", "TRIAGE_DEADLINE_EXCEEDED"),
+        ("/extract", "EXTRACTION_DEADLINE_EXCEEDED"),
+        ("/orchestrate", "WORKFLOW_DEADLINE"),
+    ],
+)
+async def test_body_receiving_uses_request_deadline_and_releases_admission(
+    settings: Settings, redis: Redis, path: str, code: str
+) -> None:
+    bounded = settings.model_copy(
+        update={
+            "request_timeout_seconds": 0.05,
+            "extract_timeout_seconds": 0.05,
+            "orchestrate_timeout_seconds": 0.05,
+            "max_concurrent_extractions": 1,
+            "max_concurrent_workflows": 1,
+        }
+    )
+
+    async def body() -> AsyncIterator[bytes]:
+        yield b"{"
+        await asyncio.sleep(1)
+        yield b"}"
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        pytest.fail("A timed-out body must not start provider work")
+
+    async with api_client(bounded, redis, provider) as client:
+        response = await client.post(
+            path, content=body(), headers={"content-type": "application/json"}
+        )
+        assert response.status_code == 504
+        assert response.json()["error"]["code"] == code
+        assert (await client.post(path, json={})).status_code == 422
+    assert await redis.dbsize() == 0
 
 
 async def test_success_and_stable_cached_decision(
@@ -197,11 +237,11 @@ async def test_invalid_model_output_is_not_served_or_cached(
         response = await client.post("/triage", json=signal)
     assert response.status_code == 502
     assert response.json()["error"]["code"] == code
-    assert calls == (2 if code == "MODEL_INVALID_RESPONSE" else 1)
+    assert calls == 2
     assert await redis.dbsize() == 0
 
 
-@pytest.mark.parametrize("case", ["duplicate", "noise", "extra"])
+@pytest.mark.parametrize("case", ["duplicate", "noise", "extra", "routing", "ticket"])
 async def test_invalid_decision_is_corrected_once_with_private_validation_logs(
     settings: Settings,
     redis: Redis,
@@ -224,6 +264,14 @@ async def test_invalid_decision_is_corrected_once_with_private_validation_logs(
         invalid = dict(decision, remediation_steps=["PRIVATE_REPAIR_VALUE"])
     elif case == "duplicate":
         invalid = dict(decision, missing_information=["affected_crew", "affected_crew"])
+    elif case == "routing":
+        invalid = dict(
+            decision,
+            assigned_team="Threat Response Command",
+            next_best_action="PRIVATE_REPAIR_VALUE",
+        )
+    elif case == "ticket":
+        invalid = dict(decision, ticket_id="SIG-999", next_best_action="PRIVATE_REPAIR_VALUE")
     else:
         invalid = dict(decision, PRIVATE_UNKNOWN_KEY="PRIVATE_REPAIR_VALUE")
     calls: list[dict[str, Any]] = []
@@ -264,12 +312,52 @@ async def test_invalid_decision_is_corrected_once_with_private_validation_logs(
     failures = [entry for entry in entries if entry["event"] == "triage_validation_failed"]
     assert len(failures) == 1
     assert failures[0]["ticket_id"] == signal["ticket_id"]
-    assert failures[0]["code"] == "MODEL_INVALID_RESPONSE"
+    expected_code = {
+        "routing": "MODEL_ROUTING_CONFLICT",
+        "ticket": "MODEL_TICKET_MISMATCH",
+    }.get(case, "MODEL_INVALID_RESPONSE")
+    assert failures[0]["code"] == expected_code
     assert failures[0]["validation_error_types"] == [
-        "extra_forbidden" if case == "extra" else "value_error"
+        expected_code
+        if case in {"routing", "ticket"}
+        else "extra_forbidden"
+        if case == "extra"
+        else "value_error"
     ]
     assert "PRIVATE_UNKNOWN_KEY" not in logs
     assert "PRIVATE_REPAIR_VALUE" not in logs
+
+
+@pytest.mark.parametrize("routing_first", [False, True])
+async def test_schema_and_domain_failures_share_one_correction_budget(
+    settings: Settings,
+    redis: Redis,
+    signal: dict[str, Any],
+    decision: dict[str, Any],
+    routing_first: bool,
+) -> None:
+    candidates = [
+        dict(decision, missing_information=["affected_crew", "affected_crew"]),
+        dict(decision, assigned_team="Threat Response Command"),
+    ]
+    if routing_first:
+        candidates.reverse()
+    calls = 0
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert calls <= 2, "Schema and domain checks must not get separate correction loops"
+        return completion(candidates[calls - 1])
+
+    async with api_client(settings, redis, provider) as client:
+        response = await client.post("/triage", json=signal)
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == (
+        "MODEL_INVALID_RESPONSE" if routing_first else "MODEL_ROUTING_CONFLICT"
+    )
+    assert calls == 2
+    assert await redis.dbsize() == 0
 
 
 @pytest.mark.parametrize("provider_status", [401, 403, 400, 302])
@@ -541,17 +629,51 @@ async def test_two_instances_do_not_classify_same_signal_concurrently(
 
     async with api_client(settings, redis, provider) as first:
         async with api_client(settings, redis, provider) as second:
-            pending = asyncio.create_task(first.post("/triage", json=signal))
+            pending = [asyncio.create_task(first.post("/triage", json=signal))]
             try:
                 await asyncio.wait_for(started.wait(), timeout=2)
-                busy = await second.post("/triage", json=signal)
-                assert busy.status_code == 503
-                assert busy.json()["error"]["code"] == "SIGNAL_IN_PROGRESS"
+                pending.append(asyncio.create_task(second.post("/triage", json=signal)))
+                await asyncio.sleep(0.03)
+                assert not pending[1].done()
             finally:
                 release.set()
-                await pending
+                responses = await asyncio.gather(*pending)
+            assert all(response.status_code == 200 for response in responses)
+            assert all(response.json() == decision for response in responses)
             cached = await second.post("/triage", json=signal)
             assert cached.json() == decision
+    assert calls == 1
+
+
+async def test_duplicate_waiter_deadline_does_not_release_original_lease(
+    settings: Settings, redis: Redis, signal: dict[str, Any], decision: dict[str, Any]
+) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def provider(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return completion(decision)
+
+    impatient = settings.model_copy(update={"request_timeout_seconds": 0.1})
+    async with api_client(settings, redis, provider) as first:
+        async with api_client(impatient, redis, provider) as second:
+            original = asyncio.create_task(first.post("/triage", json=signal))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                response = await second.post("/triage", json=signal)
+                assert response.status_code == 504
+                assert response.json()["error"]["code"] == "TRIAGE_DEADLINE_EXCEEDED"
+                key = DecisionStore(redis, settings).key(Signal.model_validate(signal))
+                assert await redis.exists(key + ":lease")
+                assert calls == 1
+            finally:
+                release.set()
+                assert (await original).status_code == 200
+            assert (await second.post("/triage", json=signal)).json() == decision
     assert calls == 1
 
 

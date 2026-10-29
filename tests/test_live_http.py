@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import httpx
+import pytest
 import uvicorn
 from fakeredis import FakeAsyncRedis
 from fastapi import Request
@@ -20,8 +21,134 @@ from triage.api import create_app
 from triage.settings import Settings
 
 
+@pytest.mark.parametrize("endpoint", ["triage", "extract", "orchestrate"])
+def test_fifty_cold_identical_requests_over_real_http(
+    settings: Settings, signal: dict[str, Any], decision: dict[str, Any], endpoint: str
+) -> None:
+    provider_calls = 0
+    tool_calls = 0
+    unicode_text = "\u200b\u202eMission status \U0001f680"
+
+    async def provider(request: httpx.Request) -> httpx.Response:
+        nonlocal provider_calls
+        provider_calls += 1
+        await asyncio.sleep(0.1)
+        if endpoint == "triage":
+            supplied = json.loads(json.loads(request.content)["messages"][1]["content"])
+            assert supplied["description"].endswith(unicode_text)
+            return completion(
+                dict(decision, assigned_team="Threat Response Command")
+                if provider_calls == 1
+                else decision
+            )
+        if endpoint == "extract":
+            return completion({"amount": "$1,234.50"})
+        return completion(
+            plan([call("inventory_query")]) if provider_calls == 1 else plan(status="completed")
+        )
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        origin = f"http://127.0.0.1:{sock.getsockname()[1]}"
+        configured = settings.model_copy(
+            update={
+                "max_concurrent_models": 2,
+                "max_concurrent_extractions": 2,
+                "max_concurrent_workflows": 2,
+                "tool_allowed_origins": [origin],
+                "tool_private_origins": [origin],
+            }
+        )
+        app = create_app(
+            configured,
+            transport=httpx.MockTransport(provider),
+            redis_client=FakeAsyncRedis(decode_responses=True),
+        )
+
+        @app.post("/probe-tool")
+        async def actual_tool() -> dict[str, bool]:
+            nonlocal tool_calls
+            tool_calls += 1
+            return {"checked": True}
+
+        payloads = {
+            "triage": dict(signal, description=signal["description"] + unicode_text),
+            "extract": {
+                "document_id": "cold-probe-document",
+                "content": image_content(),
+                "content_format": "image_base64",
+                "json_schema": {
+                    "type": "object",
+                    "properties": {"amount": {"type": ["number", "null"]}},
+                },
+            },
+            "orchestrate": {
+                "task_id": "cold-probe-workflow",
+                "goal": "Read the synthetic inventory once. " + unicode_text,
+                "available_tools": [
+                    {
+                        "name": "inventory_query",
+                        "description": "Read a synthetic inventory status.",
+                        "endpoint": origin + "/probe-tool",
+                        "parameters": [],
+                    }
+                ],
+                "constraints": [],
+            },
+        }
+        required = {
+            "triage": set(decision),
+            "extract": {"document_id", "amount"},
+            "orchestrate": {"task_id", "status", "reason", "steps_executed"},
+        }
+        server = uvicorn.Server(uvicorn.Config(app, log_level="error", access_log=False))
+        thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not server.started and thread.is_alive() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert server.started
+
+            async def probe() -> None:
+                async with httpx.AsyncClient(
+                    base_url=origin, timeout=5, limits=httpx.Limits(max_connections=50)
+                ) as client:
+                    responses = await asyncio.gather(
+                        *(client.post("/" + endpoint, json=payloads[endpoint]) for _ in range(50))
+                    )
+                    assert [response.status_code for response in responses] == [200] * 50
+                    assert all(
+                        required[endpoint] <= response.json().keys() for response in responses
+                    )
+                    if endpoint != "orchestrate":
+                        assert all(response.json() == responses[0].json() for response in responses)
+                    repeats = [
+                        await client.post("/" + endpoint, json=payloads[endpoint]) for _ in range(3)
+                    ]
+                    assert all(response.status_code == 200 for response in repeats)
+                    assert all(response.json() == repeats[0].json() for response in repeats)
+                    if endpoint == "orchestrate":
+                        assert repeats[0].json()["status"] == "completed"
+                        assert repeats[0].json()["finished"]
+                        assert len(repeats[0].json()["steps_executed"]) == 1
+                    else:
+                        assert all(
+                            response.headers["x-llm-total-tokens"] == "0" for response in repeats
+                        )
+
+            asyncio.run(probe())
+            assert provider_calls == (1 if endpoint == "extract" else 2)
+            assert tool_calls == (1 if endpoint == "orchestrate" else 0)
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)
+        assert not thread.is_alive(), "HTTP server did not stop"
+
+
+@pytest.mark.parametrize("failure", ["schema", "routing", "ticket"])
 def test_live_triage_burst_queues_and_repairs_invalid_decisions(
-    settings: Settings, signal: dict[str, Any], decision: dict[str, Any]
+    settings: Settings, signal: dict[str, Any], decision: dict[str, Any], failure: str
 ) -> None:
     active = 0
     peak = 0
@@ -39,7 +166,13 @@ def test_live_triage_burst_queues_and_repairs_invalid_decisions(
             await asyncio.sleep(0.1)
             result = dict(decision, ticket_id=ticket_id)
             if ticket_id == "SIG-700000" and calls[ticket_id] == 1:
-                result["missing_information"] = ["affected_crew", "affected_crew"]
+                result.update(
+                    {
+                        "schema": {"missing_information": ["affected_crew", "affected_crew"]},
+                        "routing": {"assigned_team": "Threat Response Command"},
+                        "ticket": {"ticket_id": "SIG-999"},
+                    }[failure]
+                )
             return completion(result)
         finally:
             active -= 1

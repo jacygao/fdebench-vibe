@@ -33,8 +33,8 @@ Triage engine -> shared Redis decision lookup
         |                     |
         | cache miss          | cache hit
         v                     v
-Capacity admission       Validated decision
-and Redis lease
+Redis reservation,       Validated decision
+then model admission
         |
         v
 Async HTTPS model client + stable system policy
@@ -80,8 +80,8 @@ Typed response + model, request, usage and cache headers
 | `triage/orchestration/engine.py` | Bounded observe/plan/execute loop and honest terminal snapshots |
 
 Extraction follows admission before body buffering, typed validation, schema
-compilation, shared result lookup, image decoding/verification on a cache miss,
-distributed lease, one vision call, per-field normalization, final schema
+compilation, shared result reservation, active-worker admission, image
+decoding/verification on a cache miss, one vision call, per-field normalization, final schema
 validation and immutable commit. CPU-heavy stages use worker threads. Safe
 native encodings are preserved; other supported images are oriented/converted.
 No image URL or schema URL is fetched.
@@ -119,6 +119,9 @@ signal and model/policy/schema fingerprint, not just the ticket ID. The first
 committed response remains authoritative while that record is retained. A Redis
 lease prevents duplicate concurrent classifications; its release is conditional
 on ownership, so an expired worker cannot remove a successor's lease.
+Identical triage/extraction requests wait for that committed result within their
+original deadline rather than failing immediately or duplicating provider work.
+Waiting triage duplicates do not occupy active model slots.
 
 There is no silent stateless fallback when Redis is unavailable. Raw signals are
 not stored, but decisions include ticket IDs and action text and may contain
@@ -149,6 +152,9 @@ for authenticated ingress, Redis ACLs/TLS and controlled retention.
 The default model-attempt timeout is eight seconds, total triage budget 20 seconds,
 and per-process model concurrency 16. Triage waits for a slot within the total
 request budget; queue expiry returns 504 without starting a model request.
+All task deadlines start before body receiving. Extraction and orchestration
+admit bounded bodies and queue excess requests without buffering them; admission
+waits do not reset the model or workflow budget.
 Transient provider failures retry within the remaining budget and honor
 `Retry-After`. Invalid triage decisions receive at most one validation-guided
 correction, sharing the same deadline and active slot. Usage includes both
@@ -158,7 +164,7 @@ output, malformed completion envelopes and ownership conflicts produce explicit
 names. P1 decisions always escalate.
 
 Extraction defaults to a 15-second attempt budget, a 45-second total budget and
-four active requests per instance. The middleware rejects excess work before
+four active requests per instance. The middleware queues excess work before
 large bodies are buffered; the engine also bounds direct work admission. Each
 worker may decode at most a 10 MiB, 20-million-pixel image. Total HTTP body size is
 16 MiB. Leases and cache namespaces are independent per task, and extraction
@@ -169,7 +175,7 @@ Orchestration defaults to 55 seconds including a two-second finalization reserve
 five-second tool attempts and eight active workflows. Tool response bodies are
 bounded at 256 KiB, request bodies at 256 KiB and the next planning round is
 refused once the journal exceeds 2 MiB. A final batch can grow beyond that threshold.
-Capacity failures do not imply workflow replay is safe.
+Queue expiry does not imply workflow replay is safe.
 
 Tool requests use a separate credential-free client with environment proxies and
 redirects disabled. Exact operator-approved origins are resolved before inference;

@@ -1,8 +1,11 @@
 """Shared immutable decisions and short-lived per-signal leases."""
 
+import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
@@ -78,6 +81,30 @@ class ResultStore[T: BaseModel]:
                 retry_after=1,
             )
         return token
+
+    @asynccontextmanager
+    async def reserve(self, key: str, *, deadline: float) -> AsyncIterator[T | None]:
+        """Share a completed result or own its lease, waiting within the caller's budget."""
+        busy_code = "SIGNAL_IN_PROGRESS" if self.task == "triage" else "DOCUMENT_IN_PROGRESS"
+        async with asyncio.timeout_at(deadline):
+            while True:
+                saved = await self.get(key)
+                if saved is not None:
+                    yield saved
+                    return
+                try:
+                    token = await self.acquire(key)
+                except TriageError as exc:
+                    if exc.code != busy_code:
+                        raise
+                    await asyncio.sleep(0.025)
+                else:
+                    break
+            try:
+                # The previous owner may have saved between our read and acquisition.
+                yield await self.get(key)
+            finally:
+                await self.release(key, token)
 
     async def save(self, key: str, decision: T) -> T:
         """Keep the first committed decision even if a lease expires or a worker is delayed."""

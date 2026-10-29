@@ -331,21 +331,25 @@ async def test_fifty_document_burst_is_bounded(
     configured = settings.model_copy(update={"max_concurrent_extractions": 1})
     async with api_client(configured, redis, provider) as client:
         first = asyncio.create_task(client.post("/extract", json=document))
+        pending = [first]
         try:
             await asyncio.wait_for(started.wait(), 3)
-            rest = await asyncio.gather(
-                *(
+            pending.extend(
+                asyncio.create_task(
                     client.post("/extract", json=document | {"document_id": f"DOC-{index}"})
-                    for index in range(49)
                 )
+                for index in range(49)
             )
-            assert all(response.status_code == 503 for response in rest)
-            assert all(response.headers["retry-after"] == "1" for response in rest)
-            release.set()
-            assert (await first).status_code == 200
+            await asyncio.sleep(0.03)
+            assert not any(task.done() for task in pending)
         finally:
             release.set()
-            await first
+            responses = await asyncio.gather(*pending)
+        assert all(response.status_code == 200 for response in responses)
+        assert [response.json()["document_id"] for response in responses] == [
+            document["document_id"],
+            *(f"DOC-{index}" for index in range(49)),
+        ]
     assert peak == 1
 
 
@@ -486,6 +490,46 @@ async def test_extraction_attempt_timeout_is_hard_bounded(
         assert result.json()["error"]["code"] == "MODEL_TIMEOUT"
 
 
+async def test_queued_extraction_keeps_original_deadline(
+    settings: Settings, redis: Redis, document: dict[str, Any], extracted: dict[str, Any]
+) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def provider(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await release.wait()
+        elif calls == 2:
+            await asyncio.sleep(0.25)
+        return completion(extracted)
+
+    bounded = settings.model_copy(
+        update={"max_concurrent_extractions": 1, "extract_timeout_seconds": 0.4}
+    )
+    queued_document = document | {"document_id": "queued-deadline"}
+    async with api_client(bounded, redis, provider) as client:
+        pending = [asyncio.create_task(client.post("/extract", json=document))]
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            pending.append(asyncio.create_task(client.post("/extract", json=queued_document)))
+            await asyncio.sleep(0.25)
+        finally:
+            release.set()
+            responses = await asyncio.gather(*pending)
+        assert responses[0].status_code == 200
+        assert responses[1].status_code == 504
+        assert responses[1].json()["error"]["code"] == "EXTRACTION_DEADLINE_EXCEEDED"
+        assert calls == 2
+        assert (await client.post("/extract", json=document)).status_code == 200
+        retry = await client.post("/extract", json=queued_document)
+        assert retry.status_code == 200
+        assert retry.json()["document_id"] == queued_document["document_id"]
+    assert calls == 3
+
+
 async def test_shared_duplicate_lease_between_instances(
     settings: Settings, redis: Redis, document: dict[str, Any], extracted: dict[str, Any]
 ) -> None:
@@ -501,19 +545,19 @@ async def test_shared_duplicate_lease_between_instances(
 
     async with api_client(settings, redis, provider) as first:
         async with api_client(settings, redis, provider) as second:
-            task = asyncio.create_task(first.post("/extract", json=document))
+            pending = [asyncio.create_task(first.post("/extract", json=document))]
             try:
                 await asyncio.wait_for(started.wait(), 3)
-                duplicate = await second.post("/extract", json=document)
-                assert duplicate.status_code == 503
-                assert duplicate.json()["error"]["code"] == "DOCUMENT_IN_PROGRESS"
-                release.set()
-                original = await task
-                retry = await second.post("/extract", json=document)
-                assert retry.status_code == 200 and retry.json() == original.json()
+                pending.append(asyncio.create_task(second.post("/extract", json=document)))
+                await asyncio.sleep(0.03)
+                assert not pending[1].done()
             finally:
                 release.set()
-                await task
+                responses = await asyncio.gather(*pending)
+            assert all(response.status_code == 200 for response in responses)
+            assert responses[0].json() == responses[1].json()
+            retry = await second.post("/extract", json=document)
+            assert retry.status_code == 200 and retry.json() == responses[0].json()
     assert calls == 1
 
 

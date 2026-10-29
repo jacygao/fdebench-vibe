@@ -77,7 +77,7 @@ selected extraction model has no cost estimate unless it is the same model.
 Errors use `{"error": {"code": "...", "message": "..."}}`: 413 for a triage body above
 64 KiB or extraction body above 16 MiB, 415 for incorrect content type,
 422 for invalid input, 503 for missing
-configuration, unavailable infrastructure or capacity, 504 for timeouts, and 502
+configuration or unavailable infrastructure, 504 for timeouts, and 502
 for rejected/invalid/inconsistent model output. Only transient transport failures,
 429s and server errors are retried, at most three attempts. `Retry-After` seconds
 and HTTP dates are honored. If waiting would exceed the overall deadline, the
@@ -85,13 +85,15 @@ service returns 503 immediately with that delay instead.
 
 Uncached extraction requests use one model completion, except bounded retries.
 Triage allows one validation-guided correction of an invalid decision within
-the original deadline. The corrected decision must pass the same strict
+the original deadline. Schema errors, ticket mismatches and category/team
+conflicts share that single correction budget. The corrected decision must pass the same strict
 validation; persistent invalid output returns 502 and is not cached. Validation
 logs contain recognized field names and error types, not candidate values.
 Sampling is fixed and Redis preserves the first committed decision for each
 complete input and policy/model fingerprint. A distributed lease prevents duplicate concurrent
-classifications. Busy duplicates get 503 with `Retry-After: 1`; retries return the
-same shared decision. Configure durable, non-evicting Redis and protect its
+classifications. Busy duplicates wait within their original request deadline and
+return the same shared decision without another model call. Configure durable,
+non-evicting Redis and protect its
 contents. Retention expiry, store loss or policy/model changes can cause a new
 decision. There is no silent classification fallback.
 
@@ -173,9 +175,11 @@ guessing ambiguous numeric dates. Do not expect post-processing to correct facts
 the model read incorrectly.
 
 `TRIAGE_EXTRACT_MODEL` selects the vision model on the shared configured endpoint.
-Its default attempt budget is 15 seconds and total processing budget 45 seconds.
+Its default attempt budget is 15 seconds and total request budget 45 seconds.
 The default per-instance capacity is four extraction requests, admitted **before
-body buffering**; excess work returns 503 with `Retry-After: 1`. Tune replicas and
+body buffering**; excess work queues without buffering its body. Admission, body
+receiving and processing share the original deadline; expiry returns 504.
+Identical requests share one extraction and its committed record. Tune replicas and
 capacity against provider quotas and measured memory/latency for 50-document
 bursts; the defaults do not promise 50 simultaneous successful vision calls.
 
@@ -262,7 +266,9 @@ rounds, 64 HTTP attempts and eight active workflows per instance. Independent
 calls run concurrently; dependencies require a later observed-result round.
 The body limit is 256 KiB and each tool response is bounded at 256 KiB. Planning
 stops above a 2 MiB journal budget, which a final batch can exceed.
-Capacity overflow is an explicit 503, not queued work or permission to replay.
+Excess workflows queue before body buffering within the original total deadline;
+queue expiry returns 504 without claiming or executing the task. Queueing never
+grants permission to replay an existing workflow.
 
 Redis permanently claims each exact task ID **before any tool execution** and
 persists intent before every POST, then its observed result. A repeated identical
