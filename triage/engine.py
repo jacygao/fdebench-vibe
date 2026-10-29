@@ -48,17 +48,7 @@ class TriageEngine:
         saved = await self.store.get(key)
         if saved is not None:
             return self._cached(signal, saved)
-        try:
-            async with asyncio.timeout(0.01):
-                await self.capacity.acquire()
-        except TimeoutError as exc:
-            raise TriageError(
-                "MODEL_CAPACITY_EXCEEDED",
-                "All model slots are busy; retry later.",
-                503,
-                retry_after=1,
-            ) from exc
-        try:
+        async with self.capacity:
             token = await self.store.acquire(key)
             try:
                 # Another worker may have committed between our read and lease acquisition.
@@ -71,8 +61,6 @@ class TriageEngine:
                 return replace(result, decision=saved)
             finally:
                 await self.store.release(key, token)
-        finally:
-            self.capacity.release()
 
     def _cached(self, signal: Signal, decision: TriageDecision) -> ModelResult:
         return self._validate(

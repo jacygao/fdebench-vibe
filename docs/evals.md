@@ -19,13 +19,16 @@ All requested routes and documentation are implemented. The service is
 
 ## Recorded local evidence
 
-The combined triage/extraction/orchestration suite passed **186 automated tests**
+The combined triage/extraction/orchestration suite passed **194 automated tests**
 on Python 3.12.14. Ruff lint and formatting checks, strict mypy
 over 25 source files and the dependency lockfile check also passed.
 
 The suite executes the application with mocked provider HTTP transport and an
-in-process Redis-compatible store supporting Lua scripts. Two smoke tests start
-real local HTTP socket servers. The orchestration socket test makes actual HTTP
+in-process Redis-compatible store supporting Lua scripts. Three smoke tests start
+real local HTTP socket servers. The triage burst test sends eight concurrent
+requests through two model slots, corrects one invalid decision, and checks
+stable caching and aggregate usage without overload rejection.
+The orchestration socket test makes actual HTTP
 tool POSTs through production DNS-pinned dispatch, not a mocked tool transport;
 the model and Redis remain replaced. This is not a live-provider or
 production-storage evaluation.
@@ -33,7 +36,9 @@ production-storage evaluation.
 Coverage includes input contracts; malformed/empty/wrong-content-type/oversized
 and chunked requests; structured provider output; refusals; invalid labels;
 retry timing; total deadlines; ticket correlation; P1 escalation; ownership;
-shared decisions across application instances; duplicate-work leases; bursts;
+shared decisions across application instances; duplicate-work leases; queued
+bursts; queue expiry without provider work or capacity leaks; one-shot decision
+correction, strict persistent-failure rejection and correction deadlines;
 storage outages; connection recovery after idle; headers; and log privacy.
 Adversarial tests establish instruction/data separation, not successful semantic
 resistance to injection by a real model.
@@ -85,6 +90,17 @@ ordinary schemas in both string and object encodings, using live `gpt-4.1-mini`
 vision calls. Responses preserved exact document IDs, visible invoice facts and
 null missing fields; repeats returned identical cached records. A synthetic
 invalid request confirmed field/type diagnostics without logging its value.
+
+A subsequent evaluator run stopped during triage. Logs showed 40 capacity
+rejections (503) and 12 invalid-model-response failures (502), not model
+timeouts. After replacing immediate capacity rejection with deadline-bounded
+queueing and adding one strict validation-correction attempt, a public burst of
+50 fresh synthetic signals using the real provider and Redis returned 50 HTTP
+200 responses in 6.84 seconds overall; the slowest request took 6.81 seconds.
+All 50 repeats returned identical cached decisions with zero new model tokens.
+No invalid decisions occurred during that burst; correction behavior is covered
+by the provider-mocked regressions above.
+
 No successful public/hidden benchmark score or labelled live-model evaluation
 is claimed. Neither synthetic checks nor mocked contract tests establish
 classification quality or the customer's under-15% misrouting target.

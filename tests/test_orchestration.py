@@ -102,6 +102,48 @@ async def client_for(
             yield client
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "expected_origin"),
+    [
+        (
+            "https://unapproved.example/opaque/PRIVATE_TOOL_TOKEN?key=PRIVATE_QUERY_TOKEN",
+            "https://unapproved.example",
+        ),
+        (
+            "https://user:PRIVATE_PASSWORD@unapproved.example/opaque/PRIVATE_TOOL_TOKEN",
+            None,
+        ),
+    ],
+)
+async def test_rejected_tool_logs_only_safe_origin(
+    settings: Settings,
+    redis: Redis,
+    capsys: pytest.CaptureFixture[str],
+    endpoint: str,
+    expected_origin: str | None,
+) -> None:
+    definition = tool("inventory_query")
+    definition["endpoint"] = endpoint
+    request = workflow([definition])
+    async with client_for(
+        config(settings),
+        redis,
+        [],
+        lambda _: pytest.fail("A rejected tool URL must not be called"),
+    ) as client:
+        response = await client.post("/orchestrate", json=request)
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_TOOL_URL"
+    logs = capsys.readouterr().err
+    entries = [json.loads(line) for line in logs.splitlines()]
+    rejected = next(entry for entry in entries if entry["event"] == "tool_destination_rejected")
+    assert rejected["tool_origin"] == expected_origin
+    assert rejected["task_id"] == request["task_id"]
+    assert rejected["code"] == "INVALID_TOOL_URL"
+    for private_value in ("PRIVATE_TOOL_TOKEN", "PRIVATE_QUERY_TOKEN", "PRIVATE_PASSWORD"):
+        assert private_value not in logs
+
+
 async def test_real_calls_derive_ids_preserve_urls_and_journal_before_send(
     settings: Settings, redis: Redis, capsys: pytest.CaptureFixture[str]
 ) -> None:

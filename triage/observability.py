@@ -19,6 +19,7 @@ class JsonFormatter(logging.Formatter):
             "document_id",
             "task_id",
             "tool",
+            "tool_origin",
             "step",
             "outcome",
             "parameter_names",

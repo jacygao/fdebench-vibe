@@ -13,6 +13,7 @@ from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from tests.conftest import api_client, completion
+from triage.api import create_app
 from triage.models import Signal
 from triage.settings import Settings
 from triage.store import DecisionStore
@@ -185,11 +186,90 @@ async def test_invalid_model_output_is_not_served_or_cached(
     code: str,
 ) -> None:
     decision.update(change)
-    async with api_client(settings, redis, lambda r: completion(decision)) as client:
+    calls = 0
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return completion(decision)
+
+    async with api_client(settings, redis, provider) as client:
         response = await client.post("/triage", json=signal)
     assert response.status_code == 502
     assert response.json()["error"]["code"] == code
+    assert calls == (2 if code == "MODEL_INVALID_RESPONSE" else 1)
     assert await redis.dbsize() == 0
+
+
+@pytest.mark.parametrize("case", ["duplicate", "noise", "extra"])
+async def test_invalid_decision_is_corrected_once_with_private_validation_logs(
+    settings: Settings,
+    redis: Redis,
+    signal: dict[str, Any],
+    decision: dict[str, Any],
+    capsys: pytest.CaptureFixture[str],
+    case: str,
+) -> None:
+    if case == "noise":
+        signal.update(subject="Automatic reply", description="I am away until next week.")
+        decision.update(
+            category="Not a Mission Signal",
+            priority="P4",
+            assigned_team="None",
+            needs_escalation=False,
+            missing_information=[],
+            next_best_action="Archive the automatic reply.",
+            remediation_steps=[],
+        )
+        invalid = dict(decision, remediation_steps=["PRIVATE_REPAIR_VALUE"])
+    elif case == "duplicate":
+        invalid = dict(decision, missing_information=["affected_crew", "affected_crew"])
+    else:
+        invalid = dict(decision, PRIVATE_UNKNOWN_KEY="PRIVATE_REPAIR_VALUE")
+    calls: list[dict[str, Any]] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        if len(calls) == 1:
+            return completion(invalid)
+        assert body["messages"][:2] == calls[0]["messages"]
+        assert json.loads(body["messages"][-2]["content"]) == invalid
+        feedback = json.loads(body["messages"][-1]["content"])
+        assert feedback["validation_errors"]
+        assert all(
+            "input" not in error and "ctx" not in error for error in feedback["validation_errors"]
+        )
+        return completion(decision)
+
+    priced = settings.model_copy(
+        update={
+            "input_price_per_million": Decimal("1"),
+            "output_price_per_million": Decimal("2"),
+        }
+    )
+    async with api_client(priced, redis, provider) as client:
+        response = await client.post("/triage", json=signal)
+        cached = await client.post("/triage", json=signal)
+    assert response.status_code == cached.status_code == 200
+    assert response.json() == cached.json() == decision
+    assert len(calls) == 2
+    assert response.headers["x-llm-input-tokens"] == "1000"
+    assert response.headers["x-llm-output-tokens"] == "200"
+    assert response.headers["x-llm-total-tokens"] == "1200"
+    assert response.headers["x-llm-estimated-cost-usd"] == "0.00140000"
+    assert cached.headers["x-decision-cache"] == "hit"
+    logs = capsys.readouterr().err
+    entries = [json.loads(line) for line in logs.splitlines()]
+    failures = [entry for entry in entries if entry["event"] == "triage_validation_failed"]
+    assert len(failures) == 1
+    assert failures[0]["ticket_id"] == signal["ticket_id"]
+    assert failures[0]["code"] == "MODEL_INVALID_RESPONSE"
+    assert failures[0]["validation_error_types"] == [
+        "extra_forbidden" if case == "extra" else "value_error"
+    ]
+    assert "PRIVATE_UNKNOWN_KEY" not in logs
+    assert "PRIVATE_REPAIR_VALUE" not in logs
 
 
 @pytest.mark.parametrize("provider_status", [401, 403, 400, 302])
@@ -268,10 +348,21 @@ async def test_retry_after_is_honored_before_second_attempt(
     assert attempt_times[1] - attempt_times[0] >= 1
 
 
+@pytest.mark.parametrize("invalid_first", [False, True])
 async def test_timeout_and_total_deadline(
-    settings: Settings, redis: Redis, signal: dict[str, Any]
+    settings: Settings,
+    redis: Redis,
+    signal: dict[str, Any],
+    decision: dict[str, Any],
+    invalid_first: bool,
 ) -> None:
+    calls = 0
+
     async def slow_provider(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if invalid_first and calls == 1:
+            return completion(dict(decision, priority="invalid"))
         await asyncio.sleep(10)
         pytest.fail("Overall deadline did not cancel the provider")
 
@@ -280,6 +371,7 @@ async def test_timeout_and_total_deadline(
         response = await client.post("/triage", json=signal)
     assert response.status_code == 504
     assert response.json()["error"]["code"] == "TRIAGE_DEADLINE_EXCEEDED"
+    assert calls == (2 if invalid_first else 1)
     assert await redis.dbsize() == 0
 
 
@@ -385,18 +477,52 @@ async def test_burst_limits_capacity_and_recovers(
     bounded = settings.model_copy(update={"max_concurrent_models": 1})
     async with api_client(bounded, redis, provider) as client:
         first = asyncio.create_task(client.post("/triage", json=signal))
+        pending = [first]
         try:
             await asyncio.wait_for(started.wait(), timeout=2)
-            other = dict(signal, ticket_id="SIG-4830")
-            responses = await asyncio.gather(
-                *[client.post("/triage", json=other) for _ in range(10)]
+            pending.extend(
+                asyncio.create_task(
+                    client.post("/triage", json=dict(signal, ticket_id=f"SIG-{4830 + index}"))
+                )
+                for index in range(10)
             )
-            assert all(response.status_code == 503 for response in responses)
-            assert all(response.headers["retry-after"] == "1" for response in responses)
+            await asyncio.sleep(0.03)
+            assert not any(task.done() for task in pending)
         finally:
             release.set()
-            await first
-        assert (await client.post("/triage", json=other)).status_code == 200
+            responses = await asyncio.gather(*pending)
+        assert all(response.status_code == 200 for response in responses)
+
+
+async def test_queue_deadline_does_not_call_provider_or_leak_capacity(
+    settings: Settings, redis: Redis, signal: dict[str, Any], decision: dict[str, Any]
+) -> None:
+    calls = 0
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return completion(decision)
+
+    bounded = settings.model_copy(
+        update={"max_concurrent_models": 1, "request_timeout_seconds": 0.1}
+    )
+    app = create_app(bounded, transport=httpx.MockTransport(provider), redis_client=redis)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            await app.state.engine.capacity.acquire()
+            try:
+                response = await client.post("/triage", json=signal)
+                assert response.status_code == 504
+                assert response.json()["error"]["code"] == "TRIAGE_DEADLINE_EXCEEDED"
+                assert calls == 0
+                assert await redis.dbsize() == 0
+            finally:
+                app.state.engine.capacity.release()
+            assert (await client.post("/triage", json=signal)).status_code == 200
+            assert calls == 1
 
 
 async def test_two_instances_do_not_classify_same_signal_concurrently(

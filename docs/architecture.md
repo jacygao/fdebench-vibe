@@ -138,17 +138,24 @@ guarantee. Claim loss/deletion permits execution again and requires reconciliati
 
 Full workflow parameters, results and compiled policies are sensitive journal
 data in Redis and in the caller's trace response. Operational logging emits only
-task/tool/step identifiers, parameter names, outcome, duration and usage. This
-separates evidence retention from ordinary log sinks, but does not remove the need
+task/tool/step identifiers, parameter names, outcome, duration and usage. Rejected
+tool destinations also log a canonical, credential-free origin, never URL paths
+or query parameters. This separates evidence retention from ordinary log sinks,
+but does not remove the need
 for authenticated ingress, Redis ACLs/TLS and controlled retention.
 
 ## Reliability and deployment
 
 The default model-attempt timeout is eight seconds, total triage budget 20 seconds,
-and per-process model concurrency 16. Busy work fails promptly with 503. Transient
-provider failures retry within the remaining budget and honor `Retry-After`.
-Invalid provider output or ownership conflicts produce explicit 502 responses.
-P1 decisions always escalate.
+and per-process model concurrency 16. Triage waits for a slot within the total
+request budget; queue expiry returns 504 without starting a model request.
+Transient provider failures retry within the remaining budget and honor
+`Retry-After`. Invalid triage decisions receive at most one validation-guided
+correction, sharing the same deadline and active slot. Usage includes both
+completed responses. Strict validation remains mandatory; persistent invalid
+output, malformed completion envelopes and ownership conflicts produce explicit
+502 responses. Validation logs omit candidate values and unrecognized field
+names. P1 decisions always escalate.
 
 Extraction defaults to a 15-second attempt budget, a 45-second total budget and
 four active requests per instance. The middleware rejects excess work before

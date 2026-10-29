@@ -1,9 +1,11 @@
 """Real socket smoke test with the external model and Redis replaced."""
 
+import asyncio
 import json
 import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import httpx
@@ -16,6 +18,73 @@ from tests.test_extraction import image_content
 from tests.test_orchestration import call, plan
 from triage.api import create_app
 from triage.settings import Settings
+
+
+def test_live_triage_burst_queues_and_repairs_invalid_decisions(
+    settings: Settings, signal: dict[str, Any], decision: dict[str, Any]
+) -> None:
+    active = 0
+    peak = 0
+    calls: dict[str, int] = {}
+    barrier = threading.Barrier(8)
+
+    async def provider(request: httpx.Request) -> httpx.Response:
+        nonlocal active, peak
+        current = json.loads(json.loads(request.content)["messages"][1]["content"])
+        ticket_id = current["ticket_id"]
+        calls[ticket_id] = calls.get(ticket_id, 0) + 1
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.1)
+            result = dict(decision, ticket_id=ticket_id)
+            if ticket_id == "SIG-700000" and calls[ticket_id] == 1:
+                result["missing_information"] = ["affected_crew", "affected_crew"]
+            return completion(result)
+        finally:
+            active -= 1
+
+    app = create_app(
+        settings.model_copy(update={"max_concurrent_models": 2}),
+        transport=httpx.MockTransport(provider),
+        redis_client=FakeAsyncRedis(decode_responses=True),
+    )
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        server = uvicorn.Server(uvicorn.Config(app, log_level="error", access_log=False))
+        thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not server.started and thread.is_alive() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert server.started
+            with httpx.Client(
+                base_url=f"http://127.0.0.1:{sock.getsockname()[1]}", timeout=5
+            ) as client:
+
+                def send(index: int) -> httpx.Response:
+                    barrier.wait(timeout=5)
+                    return client.post(
+                        "/triage", json=dict(signal, ticket_id=f"SIG-{700000 + index}")
+                    )
+
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    responses = list(pool.map(send, range(8)))
+                assert [response.status_code for response in responses] == [200] * 8
+                for index, response in enumerate(responses):
+                    assert response.json() == dict(decision, ticket_id=f"SIG-{700000 + index}")
+                assert peak == 2
+                assert sum(calls.values()) == 9
+                assert responses[0].headers["x-llm-total-tokens"] == "1200"
+                cached = client.post("/triage", json=dict(signal, ticket_id="SIG-700000"))
+                assert cached.status_code == 200
+                assert cached.headers["x-decision-cache"] == "hit"
+                assert sum(calls.values()) == 9
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)
+        assert not thread.is_alive(), "HTTP server did not stop"
 
 
 def test_live_server_contract(

@@ -2,6 +2,7 @@
 
 import asyncio
 import ipaddress
+import logging
 import socket
 from dataclasses import dataclass
 from time import perf_counter, time
@@ -16,6 +17,8 @@ from triage.orchestration.guards import authorize_batch
 from triage.orchestration.journal import Journal
 from triage.orchestration.models import ConstraintPolicy, ProposedCall, Tool
 from triage.settings import Settings
+
+logger = logging.getLogger(__name__)
 
 MAX_TOOL_RESPONSE_BYTES = 256 * 1024
 
@@ -58,8 +61,11 @@ class Destination:
     address: str
 
 
-async def validate_destination(endpoint: str, settings: Settings) -> Destination:
+async def validate_destination(
+    endpoint: str, settings: Settings, *, task_id: str | None = None
+) -> Destination:
     """Validate an exact operator-authorized origin and pin a safe DNS answer."""
+    safe_origin: str | None = None
     try:
         parsed = urlsplit(endpoint)
         url = httpx.URL(endpoint)
@@ -72,9 +78,11 @@ async def validate_destination(endpoint: str, settings: Settings) -> Destination
             or parsed.fragment
             or any(ord(char) <= 32 or ord(char) >= 127 for char in endpoint)
             or str(url) != endpoint
-            or origin not in settings.tool_allowed_origins
         ):
-            raise ValueError("Unapproved or noncanonical tool URL")
+            raise ValueError("Noncanonical or invalid tool URL")
+        safe_origin = origin
+        if origin not in settings.tool_allowed_origins:
+            raise ValueError("Unapproved tool origin")
         private_allowed = origin in settings.tool_private_origins
         if parsed.scheme != "https" and not private_allowed:
             raise ValueError("Plain HTTP requires an explicitly trusted private origin")
@@ -93,6 +101,14 @@ async def validate_destination(endpoint: str, settings: Settings) -> Destination
             raise ValueError("Tool DNS resolved outside the authorized public network")
         return Destination(endpoint, str(addresses[0]))
     except (ValueError, httpx.InvalidURL, OSError) as exc:
+        logger.warning(
+            "tool_destination_rejected",
+            extra={
+                "task_id": task_id,
+                "tool_origin": safe_origin,
+                "code": "INVALID_TOOL_URL",
+            },
+        )
         raise TriageError(
             "INVALID_TOOL_URL",
             "Tool URLs must exactly match an operator-approved origin and safe destination.",

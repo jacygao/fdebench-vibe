@@ -75,7 +75,9 @@ class OrchestrationEngine:
                         [tool.name for tool in workflow.available_tools],
                         await asyncio.gather(
                             *(
-                                validate_destination(tool.endpoint, self.settings)
+                                validate_destination(
+                                    tool.endpoint, self.settings, task_id=workflow.task_id
+                                )
                                 for tool in workflow.available_tools
                             )
                         ),

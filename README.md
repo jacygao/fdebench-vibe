@@ -67,8 +67,9 @@ decisions, including ticket IDs and action text that may contain sensitive detai
 Every response carries `X-Model-Name` and `X-Request-ID`. Successful responses include
 `X-Decision-Cache`, `X-LLM-Input-Tokens`, `X-LLM-Output-Tokens` and
 `X-LLM-Total-Tokens`. Configure both per-million prices to also return
-`X-LLM-Estimated-Cost-USD`. Usage refers to the successful completion, not the
-entire provider bill. Failed requests may still incur provider charges.
+`X-LLM-Estimated-Cost-USD`. Usage sums completed model responses used by a
+successful request, including a triage validation correction, not the entire
+provider bill. Failed requests may still incur provider charges.
 Cached decisions report zero new tokens and estimated cost.
 Uncached cost estimates use the rates for `TRIAGE_LLM_MODEL`. An independently
 selected extraction model has no cost estimate unless it is the same model.
@@ -82,9 +83,13 @@ for rejected/invalid/inconsistent model output. Only transient transport failure
 and HTTP dates are honored. If waiting would exceed the overall deadline, the
 service returns 503 immediately with that delay instead.
 
-Uncached triage/extraction requests use one model completion, except bounded retries. Sampling is
-fixed and Redis preserves the first committed decision for each complete input
-and policy/model fingerprint. A distributed lease prevents duplicate concurrent
+Uncached extraction requests use one model completion, except bounded retries.
+Triage allows one validation-guided correction of an invalid decision within
+the original deadline. The corrected decision must pass the same strict
+validation; persistent invalid output returns 502 and is not cached. Validation
+logs contain recognized field names and error types, not candidate values.
+Sampling is fixed and Redis preserves the first committed decision for each
+complete input and policy/model fingerprint. A distributed lease prevents duplicate concurrent
 classifications. Busy duplicates get 503 with `Retry-After: 1`; retries return the
 same shared decision. Configure durable, non-evicting Redis and protect its
 contents. Retention expiry, store loss or policy/model changes can cause a new
@@ -303,6 +308,9 @@ the private local Compose network. Operational logs contain ticket/request IDs,
 timings, status and usage, not signal bodies, emails or provider credentials.
 
 The default per-model-attempt timeout is eight seconds, overall triage deadline
-20 seconds and per-process model concurrency 16. These are safety bounds, not
+20 seconds and per-process model concurrency 16. Triage bursts queue for a model
+slot within that same deadline rather than immediately returning a capacity
+error. Queueing, provider retries and validation correction share the total
+budget; expiry returns 504. These are safety bounds, not
 latency claims. Sub-second cold model responses and routing accuracy require live
 measurement; cache hits avoid model latency.

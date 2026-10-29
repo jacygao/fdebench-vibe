@@ -30,13 +30,19 @@ complete signal and policy/model fingerprint. Redis stores decisions, not raw
 reports; decision text can still contain sensitive information.
 
 The engine checks ticket correlation and ownership coherence and enforces P1
-escalation. It rejects invalid labels, contradictory decisions and malformed
-provider output. It does not silently rewrite category/team disagreements,
+escalation. Invalid decisions receive one model-led correction using validation
+feedback and the unchanged original policy and signal. The correction must pass
+the same validation; persistent invalid labels, contradictory decisions and
+malformed provider output remain explicit errors. Logs record recognized
+validation field names and error types without candidate values. The engine
+does not silently rewrite category/team disagreements,
 because an action plan for the original team could become unsafe.
 
 Redis leases coordinate duplicate work across instances. Per-process model
-capacity is bounded with minimal queueing. Transient failures retry within a
+capacity is bounded; triage bursts wait for a model slot instead of failing
+immediately. Queueing, transient retries and validation correction share a
 20-second default total budget; provider `Retry-After` wins over local backoff.
+Expired queued requests do not start provider work or retain a model slot.
 Long retry delays are returned as 503 instead of sleeping beyond the deadline.
 Unavailable storage fails explicitly rather than weakening repeatability.
 
