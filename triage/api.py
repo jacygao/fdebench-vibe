@@ -86,7 +86,7 @@ def create_app(
                         "model": config.extract_model,
                         "endpoint": config.llm_url,
                         "prompt": EXTRACTION_PROMPT,
-                        "engine_version": 1,
+                        "engine_version": 2,
                     },
                     task="extract",
                     timeout_seconds=config.extract_timeout_seconds,
@@ -171,19 +171,40 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def invalid_signal(request: Request, exc: RequestValidationError) -> JSONResponse:
+        path = request.url.path.rstrip("/")
+        code = {
+            "/extract": "INVALID_DOCUMENT",
+            "/orchestrate": "INVALID_WORKFLOW",
+        }.get(path, "INVALID_SIGNAL")
+        contract_fields = {
+            "/extract": ExtractionRequest.model_fields,
+            "/orchestrate": WorkflowRequest.model_fields,
+        }.get(path, Signal.model_fields)
+        errors = exc.errors()
+        logger.warning(
+            "request_validation_failed",
+            extra={
+                "request_id": request.state.request_id,
+                "code": code,
+                "validation_fields": sorted(
+                    {
+                        str(error["loc"][1])
+                        for error in errors
+                        if len(error["loc"]) > 1 and error["loc"][1] in contract_fields
+                    }
+                ),
+                "validation_error_types": sorted({error["type"] for error in errors}),
+            },
+        )
         return JSONResponse(
             status_code=422,
             content={
                 "error": {
-                    "code": {
-                        "/extract": "INVALID_DOCUMENT",
-                        "/orchestrate": "INVALID_WORKFLOW",
-                    }.get(request.url.path.rstrip("/"), "INVALID_SIGNAL"),
+                    "code": code,
                     "message": "Body does not match the request contract.",
                     "request_id": request.state.request_id,
                     "fields": [
-                        {"location": list(error["loc"]), "type": error["type"]}
-                        for error in exc.errors()
+                        {"location": list(error["loc"]), "type": error["type"]} for error in errors
                     ],
                 }
             },

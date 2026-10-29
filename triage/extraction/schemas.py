@@ -48,12 +48,14 @@ class SchemaPlan:
         return bool(self.validator.evolve(schema=schema).is_valid(value))
 
 
-def compile_schema(value: str | dict[str, JsonValue]) -> SchemaPlan:
-    """Reject invalid, remote, recursive or non-nullable field schemas before inference."""
+def compile_schema(value: str | dict[str, JsonValue] | None) -> SchemaPlan:
+    """Bound caller schemas and permit null for unavailable document fields."""
     try:
-        if isinstance(value, str):
-            if len(value) > 100_000:
-                raise ValueError("Schema exceeds 100,000 characters.")
+        if isinstance(value, str) and len(value) > 100_000:
+            raise ValueError("Schema exceeds 100,000 characters.")
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raw: JsonValue = {"type": "object", "additionalProperties": True}
+        elif isinstance(value, str):
             raw = parse_json(value)
         else:
             raw = value
@@ -72,14 +74,13 @@ def compile_schema(value: str | dict[str, JsonValue]) -> SchemaPlan:
         if not isinstance(expanded, dict) or expanded.get("type") != "object":
             raise ValueError("The root schema must have type object.")
         plan = SchemaPlan(expanded, validator_type(expanded, format_checker=FormatChecker()))
-        _check_nullable(expanded, plan, root=True)
+        _allow_null_fields(expanded, plan, root=True)
         return plan
     except (ValueError, SchemaError, ValidationError, RecursionError, KeyError) as exc:
         raise TriageError(
             "INVALID_EXTRACTION_SCHEMA",
-            "Use a bounded object schema with local non-recursive references and nullable "
-            "fields, including nullable containers, and simple bounded patterns; "
-            "document_id may be non-nullable.",
+            "Use a bounded object schema with local non-recursive references and simple "
+            "bounded patterns, or omit json_schema for schema-free extraction.",
             422,
         ) from exc
 
@@ -193,24 +194,30 @@ def _check_pattern(pattern: str) -> None:
         raise ValueError("Use simple anchored patterns with at most one variable repetition.")
 
 
-def _check_nullable(schema: JsonValue, plan: SchemaPlan, *, root: bool = False) -> None:
+def _allow_null_fields(schema: JsonValue, plan: SchemaPlan, *, root: bool = False) -> None:
     if not isinstance(schema, dict):
         return
     properties = schema.get("properties")
     if isinstance(properties, dict):
         for name, child in properties.items():
             if isinstance(child, (dict, bool)):
+                _allow_null_fields(child, plan)
                 if not (root and name == "document_id") and not plan.valid(None, child):
-                    raise ValueError("Every requested field must permit null.")
-                _check_nullable(child, plan)
+                    properties[name] = {"anyOf": [child, {"type": "null"}]}
     for keyword in SCHEMA_LISTS:
         children = schema.get(keyword)
         if isinstance(children, list):
             for child in children:
-                _check_nullable(child, plan, root=root)
-    items = schema.get("items")
-    if isinstance(items, list):
-        for child in items:
-            _check_nullable(child, plan)
-    else:
-        _check_nullable(items, plan)
+                _allow_null_fields(child, plan, root=root)
+    for keyword in SINGLE_SCHEMAS:
+        children = schema.get(keyword)
+        if isinstance(children, list):
+            for child in children:
+                _allow_null_fields(child, plan)
+        else:
+            _allow_null_fields(children, plan)
+    for keyword in SCHEMA_MAPS - {"properties"}:
+        children = schema.get(keyword)
+        if isinstance(children, dict):
+            for child in children.values():
+                _allow_null_fields(child, plan)

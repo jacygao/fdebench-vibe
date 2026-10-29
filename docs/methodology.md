@@ -49,12 +49,18 @@ completion, conservative normalization, schema validation and immutable storage.
 winner. It shares endpoint credentials and retry transport with triage while
 having independent model selection, deadlines and capacity.
 
-One contract ambiguity was resolved with the user before implementation: unreadable
-fields must be null, but non-nullable schemas forbid that. The user chose to
-require nullable fields and reject incompatible schemas before inference. Schemas
-are never silently widened. Missing keys become null, valid siblings survive a
-bad scalar, and table order/duplicate rows are retained. Contradictory schema-wide
-constraints may require a coded failure rather than a schema-invalid record.
+Unreadable fields must be null, but ordinary non-nullable schemas forbid that.
+The initial user-selected strict policy rejected such schemas. After an
+evaluation preflight failed with HTTP 422, public HTTP reproductions and the
+published request contract also established that omitted/null schemas were being
+rejected even though the evaluator permits them. The user approved replacing the
+strict policy with benchmark compatibility: named fields and containers permit
+null in an effective schema while non-null value constraints remain enforced.
+Missing, null or blank schemas request visible document facts using an open
+object schema; blank pages return only the application-owned document ID.
+Missing requested keys become null, valid siblings survive a bad scalar, and
+table order/duplicate rows are retained. Contradictory schema-wide constraints
+may still require a coded failure.
 
 Provider JSON mode handles arbitrary client schemas; the complete client schema
 is passed as user data and validated locally. A fixed extraction policy defines
@@ -153,6 +159,11 @@ transport uncertainty without erasing its failed attempt.
   release without unsafe type casts.
 - A malformed extraction `$schema` value initially returned 500. A real HTTP
   socket test reproduced it; schema validation now returns a clean 422.
+- Evaluation requests reached envelope validation but not the extraction route.
+  Existing logs did not retain validation-field diagnostics, and ngrok inspection
+  was disabled, so the exact historical payload was not recoverable. Omitted/null
+  schema HTTP reproductions exposed a contract mismatch. Validation failures now
+  log recognized field names and error types without rejected document values.
 - The initial reference expansion could lose a referenced scalar type when
   sibling metadata/composition was present. A focused normalization regression
   now covers that case, including preserving an already-valid string union value.
@@ -165,9 +176,10 @@ transport uncertainty without erasing its failed attempt.
 - Docker Desktop is not integrated into this WSL environment, so an image build
   could not be verified here. Python 3.12, the image's runtime family, was exercised
   independently.
-- No live provider credentials were supplied. Mocked completions verify API and
-  transport behavior, not model accuracy, safety judgment, prompt-injection
-  resistance or cold-response latency. No benchmark scores are claimed.
+- Provider credentials were subsequently configured and synthetic live triage,
+  vision extraction and planner/HTTP-tool smoke checks ran successfully.
+  These do not establish labelled accuracy, safety judgment, prompt-injection
+  resistance or representative cold-response latency. No benchmark scores are claimed.
 - Synthetic blank/angled documents, table-like content, transparent pixels and
   orientation tags exercise the image and contract stages only. Mocked vision
   answers cannot establish OCR accuracy on real faxes, handwriting or statements.

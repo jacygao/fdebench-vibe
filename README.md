@@ -93,8 +93,11 @@ decision. There is no silent classification fallback.
 ## Document extraction
 
 `POST /extract` accepts `document_id`, `content` (raw base64 image bytes),
-`content_format: "image_base64"`, and `json_schema` (a JSON string or schema object).
-The schema is required; its root must be an object. The response is a **flat
+`content_format: "image_base64"`, and optional `json_schema` (a JSON string or schema
+object). Omitted, null or blank schemas request extraction of visible document
+facts with descriptive field names; a blank image returns only `document_id`.
+Unknown envelope metadata is ignored, not passed to the model.
+A supplied schema's root must be an object. The response is a **flat
 object** containing the schema's fields plus the exact caller `document_id`, not
 a `fields` envelope. When the schema declares `document_id`, that property is
 validated too; otherwise it is envelope metadata outside the field schema.
@@ -110,9 +113,9 @@ schema = {
     "additionalProperties": False,
     "required": ["patient_name", "date_of_birth", "balance"],
     "properties": {
-        "patient_name": {"type": ["string", "null"], "description": "As it appears"},
-        "date_of_birth": {"type": ["string", "null"], "format": "date"},
-        "balance": {"type": ["number", "null"]},
+        "patient_name": {"type": "string", "description": "As it appears"},
+        "date_of_birth": {"type": "string", "format": "date"},
+        "balance": {"type": "number"},
     },
 }
 response = httpx.post(
@@ -129,12 +132,14 @@ response.raise_for_status()
 print(response.json())
 ```
 
-Named fields, including nested containers, must permit null. This user-selected
-policy reconciles strict validation with null for missing/unreadable facts.
-Incompatible schemas get 422 before inference. Omitted fields are included as
-null, never fabricated, and one invalid field does not blank its valid siblings.
-Schema-wide contradictions that cannot be repaired without breaking the schema
-produce a coded 502, not a purportedly valid record.
+Named fields, including nested containers, may use ordinary non-nullable types.
+The benchmark-compatible effective schema adds null as an allowed field value
+while preserving constraints on non-null values, names, nesting and required
+keys. A declared `document_id` is not relaxed. Missing or unreadable fields are
+included as null, never fabricated, and one invalid field does not blank its
+valid siblings. Malformed or unsafe schemas still get 422 before inference.
+Schema-wide contradictions that cannot satisfy the effective schema produce a
+coded 502, not a purportedly valid record.
 
 Supported images are single-page PNG, JPEG, WEBP, TIFF and GIF. Limits are 10 MiB
 decoded and normalized image bytes and 20 million pixels. Native safe encodings
@@ -174,6 +179,9 @@ health or financial information. Protect Redis, define retention and access
 policies, and account for provider data handling before processing real records.
 Operational logs include document ID, model, latency, usage and JSON Pointer
 paths of null fields, not document images or extracted values.
+Request-validation failures log recognized field names and error types, never
+the rejected values or document bytes. Ngrok request-body inspection is not
+required for these diagnostics.
 
 ## Workflow orchestration
 

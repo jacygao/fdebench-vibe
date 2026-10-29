@@ -142,10 +142,9 @@ async def test_extract_fields_and_cache_across_instances(
     [
         ({"content": "not-base64!"}, 422),
         ({"content": base64.b64encode(b"not an image").decode()}, 422),
-        ({"json_schema": '{"type":"object","properties":{"name":{"type":"string"}}}'}, 422),
         ({"json_schema": "{malformed"}, 422),
+        ({"json_schema": " " * 100_001}, 422),
         ({"json_schema": {"type": "object", "$schema": []}}, 422),
-        ({"json_schema": None}, 422),
         ({"content_format": "url"}, 422),
         ({"content": "a" * (4 * ((MAX_IMAGE_BYTES + 2) // 3) + 1)}, 413),
     ],
@@ -164,6 +163,105 @@ async def test_invalid_documents_never_call_model(
         result = await client.post("/extract", json=document | updates)
         assert result.status_code == status, result.text
         assert result.headers["x-model-name"] == settings.extract_model
+
+
+@pytest.mark.parametrize("as_string", [False, True])
+async def test_plain_schema_preserves_types_and_isolates_null_fields(
+    settings: Settings, redis: Redis, document: dict[str, Any], as_string: bool
+) -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["total", "rows", "missing", "status"],
+        "properties": {
+            "total": {"$ref": "#/$defs/amount"},
+            "rows": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["label", "amount"],
+                    "properties": {
+                        "label": {"anyOf": [{"type": "string"}]},
+                        "amount": {"$ref": "#/$defs/amount"},
+                    },
+                },
+            },
+            "missing": {"type": "string"},
+            "status": {"type": "string", "enum": ["active", "inactive"]},
+        },
+        "$defs": {"amount": {"type": "number", "minimum": 0}},
+    }
+    extracted = {
+        "total": "$123.45",
+        "rows": [
+            {"label": "Rent", "amount": "$100.00"},
+            {"label": "Adjustment", "amount": "-$25.00"},
+        ],
+        "status": "unrecognized",
+    }
+    request = document | {"json_schema": json.dumps(schema) if as_string else schema}
+    async with api_client(settings, redis, lambda r: completion(extracted)) as client:
+        first = await client.post("/extract", json=request)
+        second = await client.post("/extract", json=request)
+    assert first.status_code == second.status_code == 200, first.text
+    assert (
+        first.json()
+        == second.json()
+        == {
+            "document_id": document["document_id"],
+            "total": 123.45,
+            "rows": [
+                {"label": "Rent", "amount": 100.0},
+                {"label": "Adjustment", "amount": None},
+            ],
+            "missing": None,
+            "status": None,
+        }
+    )
+    assert second.headers["x-decision-cache"] == "hit"
+
+
+@pytest.mark.parametrize("schema_input", ["omitted", None, "", "   "])
+async def test_schema_optional_preflight_preserves_visible_fields(
+    settings: Settings,
+    redis: Redis,
+    document: dict[str, Any],
+    schema_input: str | None,
+) -> None:
+    request = {key: value for key, value in document.items() if key != "json_schema"}
+    request["source"] = "optional evaluator metadata"
+    if schema_input != "omitted":
+        request["json_schema"] = schema_input
+    extracted = {"name": "Mira Chen", "total": 123.45, "rows": [{"amount": 12.5}]}
+    async with api_client(settings, redis, lambda r: completion(extracted)) as client:
+        result = await client.post("/extract", json=request)
+    assert result.status_code == 200, result.text
+    assert result.json() == {"document_id": document["document_id"], **extracted}
+
+
+async def test_optional_schema_blank_page_and_private_validation_diagnostics(
+    settings: Settings,
+    redis: Redis,
+    document: dict[str, Any],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = document | {"content": image_content(blank=True), "json_schema": None}
+    private_marker = "PRIVATE_DOCUMENT_VALUE_DO_NOT_LOG"
+    async with api_client(settings, redis, lambda r: completion({})) as client:
+        blank = await client.post("/extract", json=request)
+        invalid = await client.post("/extract", json=request | {"json_schema": [private_marker]})
+    assert blank.status_code == 200, blank.text
+    assert blank.json() == {"document_id": document["document_id"]}
+    assert invalid.status_code == 422
+    logs = capsys.readouterr().err
+    records = [json.loads(line) for line in logs.splitlines()]
+    failed = next(row for row in records if row["event"] == "request_validation_failed")
+    assert failed["code"] == "INVALID_DOCUMENT"
+    assert failed["validation_fields"] == ["json_schema"]
+    assert set(failed["validation_error_types"]) == {"string_type", "dict_type"}
+    assert private_marker not in logs
+    assert request["content"] not in logs
 
 
 @pytest.mark.parametrize(
@@ -287,8 +385,6 @@ def test_real_image_formats_and_blank_pages(format: str) -> None:
         {"type": "object", "properties": {"x": {"$ref": "https://example.com/schema"}}},
         {"type": "object", "$defs": {"loop": {"$ref": "#/$defs/loop"}}},
         {"type": "object", "$schema": []},
-        {"type": "object", "properties": {"x": {"type": ["string", "null"], "enum": ["yes"]}}},
-        {"type": "object", "properties": {"x": {"anyOf": [{"type": "string"}]}}},
         {
             "type": "object",
             "properties": {"x": {"type": ["string", "null"], "pattern": "^(a+)+$"}},

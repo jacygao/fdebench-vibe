@@ -65,7 +65,7 @@ Typed response + model, request, usage and cache headers
 | `triage/errors.py` | Stable domain error codes |
 | `triage/extraction/models.py` | Typed extraction envelope and dynamic JSON record |
 | `triage/extraction/images.py` | Base64, image verification, orientation and encoding |
-| `triage/extraction/schemas.py` | Bounded local-only schema compilation and nullable policy |
+| `triage/extraction/schemas.py` | Bounded local-only schema compilation and benchmark null compatibility |
 | `triage/extraction/vision.py` | Vision message construction using the shared model client |
 | `triage/extraction/system_prompt.txt` | Stable factual extraction/injection-boundary policy |
 | `triage/extraction/normalization.py` | Field normalization, null isolation and final validation |
@@ -88,10 +88,13 @@ No image URL or schema URL is fetched.
 
 Extraction uses JSON-object output rather than provider-strict JSON Schema
 because arbitrary client schemas exceed that provider subset. Exact field-schema
-validation is local and mandatory. `document_id` is application-owned metadata
+validation against the effective schema is local and mandatory. `document_id` is application-owned metadata
 outside the field schema unless explicitly included as one of its properties.
-Named fields must allow null, as selected by the user; no schema is silently
-relaxed.
+The user-approved compatibility policy permits null for named fields and nested
+containers even when a caller supplies non-nullable types; constraints on
+non-null values remain enforced. Omitted, null or blank schemas use an open
+object schema to retain visible document facts. Unknown request-envelope metadata
+is ignored rather than becoming model input. Schema safety limits still apply.
 
 Orchestration follows bounded admission, typed input and URL/DNS validation,
 permanent task claim, model proposal, policy/parameter/dependency validation,

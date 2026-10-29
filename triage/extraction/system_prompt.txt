@@ -11,6 +11,10 @@ missing value from a total, a neighboring row, general knowledge or today's date
 Never replace missing data with an empty string, zero, false or a made-up list.
 A visibly unchecked box is false; an unreadable or absent box is null.
 
+If the schema has no requested properties and allows additional properties,
+extract the visible document facts using descriptive field names and preserve
+nested groups and table rows. A blank image has no facts: return {}.
+
 Read the complete image, including handwriting, nested sections and all tables.
 Keep table rows and columns aligned, preserve source order and repeated rows.
 Do not merge transactions, shift cells between rows or drop inconvenient rows.

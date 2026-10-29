@@ -27,6 +27,8 @@ class JsonFormatter(logging.Formatter):
             "input_tokens",
             "output_tokens",
             "code",
+            "validation_fields",
+            "validation_error_types",
             "attempt",
             "status",
             "duration_ms",

@@ -6,12 +6,12 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, RootModel, StringC
 
 
 class ExtractionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="ignore", strict=True)
 
     document_id: Annotated[str, StringConstraints(min_length=1, max_length=255)]
     content: str = Field(min_length=1, repr=False)
     content_format: Literal["image_base64"]
-    json_schema: str | dict[str, JsonValue] = Field(repr=False)
+    json_schema: str | dict[str, JsonValue] | None = Field(default=None, repr=False)
 
 
 class ExtractionRecord(RootModel[dict[str, JsonValue]]):

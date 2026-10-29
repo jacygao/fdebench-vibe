@@ -13,14 +13,14 @@
 | `POST /extract` | Implemented |
 | `POST /orchestrate` | Implemented |
 
-This is local repository readiness, not evidence of publication or deployment.
-All requested routes and documentation are implemented locally. The service is
+These items describe implementation readiness, not production approval.
+All requested routes and documentation are implemented. The service is
 **not production-approved** until the deployment/model checks below are completed.
 
 ## Recorded local evidence
 
-The combined triage/extraction/orchestration suite passed **179 automated tests
-in 5.89 seconds** on Python 3.12.14. Ruff lint and formatting checks, strict mypy
+The combined triage/extraction/orchestration suite passed **183 automated tests**
+on Python 3.12.14. Ruff lint and formatting checks, strict mypy
 over 25 source files and the dependency lockfile check also passed.
 
 The suite executes the application with mocked provider HTTP transport and an
@@ -38,7 +38,8 @@ storage outages; connection recovery after idle; headers; and log privacy.
 Adversarial tests establish instruction/data separation, not successful semantic
 resistance to injection by a real model.
 
-Extraction coverage includes schema strings/objects, nullable-policy rejection,
+Extraction coverage includes schema strings/objects, optional-schema preflight
+requests, ordinary non-nullable fields with per-field null compatibility,
 local references, nested tables and per-field failures, typed normalization,
 all-null blank-page responses, supported formats, angled raster documents,
 transparency, EXIF orientation, pixel/byte limits, multi-page rejection, provider
@@ -74,8 +75,18 @@ uv lock --check
 
 ## Live task evaluation
 
-No live model evaluation or public/hidden benchmark score has been obtained.
-Provider credentials were not supplied. Do not equate mocked contract tests with
+Synthetic live provider smoke checks have exercised triage, vision extraction
+and planning with real HTTP calls to an isolated synthetic tool. Public HTTPS
+liveness, readiness and task-route contract probes also succeeded. The evaluator
+subsequently reported extraction preflight HTTP 422; the contract regression was
+reproduced publicly before changing optional-schema and null-field handling.
+The corrected public endpoint returned HTTP 200 for omitted/null schemas and
+ordinary schemas in both string and object encodings, using live `gpt-4.1-mini`
+vision calls. Responses preserved exact document IDs, visible invoice facts and
+null missing fields; repeats returned identical cached records. A synthetic
+invalid request confirmed field/type diagnostics without logging its value.
+No successful public/hidden benchmark score or labelled live-model evaluation
+is claimed. Neither synthetic checks nor mocked contract tests establish
 classification quality or the customer's under-15% misrouting target.
 
 After configuring a vision/text-capable provider as required by each implemented
@@ -84,9 +95,10 @@ task and durable Redis, run the existing
 Its published Python workspace supports `make eval-triage`, targeting a service
 on port 8000. Obtain the public data and tooling under their source licensing;
 they are not bundled in this repository. Run official Task 2 fixtures unchanged
-and report schema rejections separately. Non-nullable fixtures receive 422 under
-the user-confirmed policy. Evaluate customer-approved nullable variants separately;
-never present results on modified fixtures as official benchmark scores.
+and report schema rejections separately. Ordinary non-nullable field schemas
+and missing/null schemas are accepted under the user-approved compatibility
+policy; null handling occurs inside the service, not by modifying test fixtures.
+Never present results on modified fixtures as official benchmark scores.
 The published dataset is about 71 MB; it was not downloaded or evaluated here.
 For Task 3, authorize the mock service's actual origin explicitly in both tool
 origin settings when it is local/private, and use the exact endpoints supplied
