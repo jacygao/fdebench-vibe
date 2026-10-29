@@ -92,7 +92,8 @@ validation against the effective schema is local and mandatory. `document_id` is
 outside the field schema unless explicitly included as one of its properties.
 The user-approved compatibility policy permits null for named fields and nested
 containers even when a caller supplies non-nullable types; constraints on
-non-null values remain enforced. Omitted, null or blank schemas use an open
+non-null values remain enforced, and `not`, `if`, `contains` and
+`propertyNames` subschemas are not widened. Omitted, null or blank schemas use an open
 object schema to retain visible document facts. Unknown request-envelope metadata
 is ignored rather than becoming model input. Schema safety limits still apply.
 

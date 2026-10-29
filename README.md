@@ -135,7 +135,9 @@ print(response.json())
 Named fields, including nested containers, may use ordinary non-nullable types.
 The benchmark-compatible effective schema adds null as an allowed field value
 while preserving constraints on non-null values, names, nesting and required
-keys. A declared `document_id` is not relaxed. Missing or unreadable fields are
+keys. Assertion subschemas (`not`, `if`, `contains`, `propertyNames`) stay
+unchanged, so null fields are tested against them as written. A declared
+`document_id` is not relaxed. Missing or unreadable fields are
 included as null, never fabricated, and one invalid field does not blank its
 valid siblings. Malformed or unsafe schemas still get 422 before inference.
 Schema-wide contradictions that cannot satisfy the effective schema produce a

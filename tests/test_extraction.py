@@ -596,6 +596,63 @@ def test_union_preserves_valid_text_and_local_ref_siblings() -> None:
     }
 
 
+def test_negated_property_assertion_allows_missing_fact_but_forbids_visible_value() -> None:
+    plan = compile_schema(
+        {
+            "type": "object",
+            "properties": {"x": {"type": "string"}, "y": {"type": "string"}},
+            "not": {"properties": {"x": {"const": "bad"}}, "required": ["x"]},
+        }
+    )
+    assert normalize_record('{"y":"ok"}', plan, "doc") == {
+        "document_id": "doc",
+        "x": None,
+        "y": "ok",
+    }
+    with pytest.raises(TriageError) as error:
+        normalize_record('{"x":"bad","y":"ok"}', plan, "doc")
+    assert error.value.code == "EXTRACTION_SCHEMA_CONFLICT"
+
+
+def test_conditional_guard_is_not_satisfied_by_missing_fact() -> None:
+    plan = compile_schema(
+        {
+            "type": "object",
+            "properties": {"kind": {"type": "string"}, "total": {"type": "number"}},
+            "if": {"properties": {"kind": {"const": "invoice"}}, "required": ["kind"]},
+            "then": {"properties": {"total": {"minimum": 1}}, "required": ["total"]},
+            "else": {"properties": {"total": {"maximum": 0}}},
+        }
+    )
+    assert plan.validator.is_valid({"document_id": "doc", "kind": None})
+    assert plan.validator.is_valid({"document_id": "doc", "kind": "invoice", "total": None})
+    assert not plan.validator.is_valid({"document_id": "doc", "kind": "invoice"})
+    assert not plan.validator.is_valid({"document_id": "doc", "kind": None, "total": 5})
+    assert normalize_record('{"total":0}', plan, "doc") == {
+        "document_id": "doc",
+        "kind": None,
+        "total": 0,
+    }
+
+
+def test_contains_guard_is_not_satisfied_by_null_items() -> None:
+    plan = compile_schema(
+        {
+            "type": "object",
+            "properties": {
+                "lines": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"kind": {"type": "string"}}},
+                    "contains": {"properties": {"kind": {"const": "total"}}, "required": ["kind"]},
+                }
+            },
+        }
+    )
+    assert plan.validator.is_valid({"document_id": "doc", "lines": None})
+    assert plan.validator.is_valid({"lines": [{"kind": "total"}, {"kind": None}]})
+    assert not plan.validator.is_valid({"lines": [{"kind": None}]})
+
+
 def test_local_schema_refs_and_per_field_failure() -> None:
     schema = {
         "type": "object",

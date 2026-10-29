@@ -36,6 +36,7 @@ SINGLE_SCHEMAS = {
 }
 SCHEMA_MAPS = {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
 SCHEMA_LISTS = {"allOf", "anyOf", "oneOf", "prefixItems"}
+FIELD_SCHEMAS = SINGLE_SCHEMAS - {"contains", "propertyNames", "not", "if"}
 
 
 @dataclass(frozen=True)
@@ -209,7 +210,7 @@ def _allow_null_fields(schema: JsonValue, plan: SchemaPlan, *, root: bool = Fals
         if isinstance(children, list):
             for child in children:
                 _allow_null_fields(child, plan, root=root)
-    for keyword in SINGLE_SCHEMAS:
+    for keyword in FIELD_SCHEMAS:
         children = schema.get(keyword)
         if isinstance(children, list):
             for child in children:
